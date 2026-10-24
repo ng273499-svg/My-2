@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, Code2, Cpu, MessageSquare } from 'lucide-react';
+import { Activity, BookOpen, Code2, Cpu, MessageSquare } from 'lucide-react';
 import { DEFAULT_CONVERSATION_ID } from '@/core/utils/uuid';
 import type {
   AgentActivityStep,
@@ -47,6 +47,11 @@ import {
 } from './MultimodalInputBar';
 import { AgentActivityPanel } from './AgentActivityPanel';
 import { EngineeringWorkspacePanel } from './EngineeringWorkspacePanel';
+import {
+  KnowledgeWorkspacePanel,
+  type KnowledgeDocument,
+  type KnowledgeQueryResult,
+} from './KnowledgeWorkspacePanel';
 import { SystemTelemetryPanel } from './SystemTelemetryPanel';
 import { VisionInspectorModal } from './VisionInspectorModal';
 import { SettingsDrawer } from './SettingsDrawer';
@@ -82,7 +87,105 @@ export function JarvisDashboard({
   const [authModalOpen, setAuthModalOpen] = useState(false);
 
   // Mobile responsive view tab
-  const [mobileView, setMobileView] = useState<'console' | 'activity' | 'systems' | 'engineering'>('console');
+  const [mobileView, setMobileView] = useState<
+    'console' | 'activity' | 'systems' | 'engineering' | 'knowledge'
+  >('console');
+
+  // --- v1.2 Knowledge/Documents workspace state -------------------------
+  const [knowledgeDocuments, setKnowledgeDocuments] = useState<KnowledgeDocument[]>([]);
+  const [knowledgeEmbedding, setKnowledgeEmbedding] = useState<{
+    mode: string;
+    honestNote: string;
+  } | null>(null);
+  const [knowledgeRerankingMode, setKnowledgeRerankingMode] = useState<string>(
+    'deterministic_fallback'
+  );
+
+  const refreshKnowledgeDocuments = useCallback(async () => {
+    try {
+      const response = await fetch('/api/jarvis/files', { cache: 'no-store' });
+      if (!response.ok) return;
+      const payload = (await response.json()) as {
+        intelligence?: {
+          documents?: KnowledgeDocument[];
+          embedding?: { mode: string; honestNote: string };
+          rerankingMode?: string;
+        };
+      };
+      setKnowledgeDocuments(payload.intelligence?.documents ?? []);
+      if (payload.intelligence?.embedding) {
+        setKnowledgeEmbedding(payload.intelligence.embedding);
+      }
+      if (payload.intelligence?.rerankingMode) {
+        setKnowledgeRerankingMode(payload.intelligence.rerankingMode);
+      }
+    } catch {
+      // Silent: the workspace still functions with an empty list.
+    }
+  }, []);
+
+  const handleKnowledgeUpload = useCallback(
+    async (file: File) => {
+      const form = new FormData();
+      form.append('file', file);
+      const response = await fetch('/api/jarvis/files/ingest', {
+        method: 'POST',
+        body: form,
+      });
+      const payload = (await response.json()) as {
+        ok?: boolean;
+        error?: string;
+        ingestion?: { warnings?: string[] };
+      };
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error ?? 'Document ingestion failed.');
+      }
+      await refreshKnowledgeDocuments();
+    },
+    [refreshKnowledgeDocuments]
+  );
+
+  const handleKnowledgeRemove = useCallback(
+    async (documentId: string) => {
+      const response = await fetch(`/api/jarvis/files/${encodeURIComponent(documentId)}`, {
+        method: 'DELETE',
+      });
+      const payload = (await response.json()) as { ok?: boolean; error?: string };
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error ?? 'Document removal failed.');
+      }
+      await refreshKnowledgeDocuments();
+    },
+    [refreshKnowledgeDocuments]
+  );
+
+  const handleKnowledgeQuery = useCallback(
+    async (query: string): Promise<KnowledgeQueryResult> => {
+      const response = await fetch('/api/jarvis/files/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query }),
+      });
+      const payload = (await response.json()) as {
+        ok?: boolean;
+        error?: string;
+        answer?: KnowledgeQueryResult['answer'];
+        citations?: KnowledgeQueryResult['citations'];
+        verification?: KnowledgeQueryResult['verification'];
+        retrieval?: KnowledgeQueryResult['retrieval'];
+      };
+      if (!response.ok || !payload.ok || !payload.answer) {
+        throw new Error(payload.error ?? 'Document query failed.');
+      }
+      return {
+        answer: payload.answer,
+        citations: payload.citations ?? [],
+        verification: payload.verification,
+        retrieval: payload.retrieval,
+      };
+    },
+    []
+  );
 
   // Real-Time Browser Voice & Female Persona Controller State (never auto-started)
   const voiceControllerRef = useRef<BrowserVoiceSessionController | null>(null);
@@ -964,6 +1067,21 @@ export function JarvisDashboard({
                   <Code2 className="h-4 w-4" />
                   <span>Engineering</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileView('knowledge');
+                    void refreshKnowledgeDocuments();
+                  }}
+                  className={`flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl font-display text-xs font-semibold transition ${
+                    mobileView === 'knowledge'
+                      ? 'border border-cyan-400/40 bg-cyan-500/15 text-cyan-100'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <BookOpen className="h-4 w-4" />
+                  <span>Knowledge</span>
+                </button>
               </nav>
 
               {mobileView === 'console' && (
@@ -1055,6 +1173,18 @@ export function JarvisDashboard({
               {mobileView === 'engineering' && (
                 <EngineeringWorkspacePanel
                   authenticated={Boolean(snapshot?.auth.authenticated)}
+                />
+              )}
+
+              {mobileView === 'knowledge' && (
+                <KnowledgeWorkspacePanel
+                  documents={knowledgeDocuments}
+                  embeddingMode={knowledgeEmbedding?.mode ?? 'deterministic_fallback'}
+                  embeddingHonestNote={knowledgeEmbedding?.honestNote}
+                  rerankingMode={knowledgeRerankingMode}
+                  onUpload={handleKnowledgeUpload}
+                  onRemove={handleKnowledgeRemove}
+                  onQuery={handleKnowledgeQuery}
                 />
               )}
 

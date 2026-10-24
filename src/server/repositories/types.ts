@@ -94,17 +94,61 @@ export interface ConnectedToolRecord {
   updatedAt: string;
 }
 
+/** v1.2 document formats persisted in `ingested_documents.format_kind`. */
+export type IngestedDocumentFormatKind =
+  | 'markdown'
+  | 'text'
+  | 'csv'
+  | 'json'
+  | 'code'
+  | 'pdf'
+  | 'docx'
+  | 'html'
+  | 'xml'
+  | 'yaml'
+  | 'toml';
+
 export interface IngestedDocumentRecord {
   id: string;
   projectId: string | null;
   fileName: string;
   mimeType: string;
-  formatKind: 'markdown' | 'text' | 'csv' | 'json' | 'code';
+  formatKind: IngestedDocumentFormatKind;
   sizeBytes: number;
   chunkCount: number;
   injectionFlagged: boolean;
   summary: string;
   metadata: Record<string, unknown>;
+  createdAt: string;
+  /** v1.2 Grounded Document Intelligence fields (all optional/additive). */
+  contentHash?: string | null;
+  pageCount?: number;
+  lifecycle?: string;
+  parser?: string | null;
+  parserVersion?: string | null;
+  embeddingMode?: string | null;
+  ocrRequired?: boolean;
+  pageProvenanceAvailable?: boolean;
+  trustLevel?: string;
+}
+
+/** One retrievable document chunk with verified provenance. */
+export interface DocumentChunkRecord {
+  id: string;
+  documentId: string;
+  projectId: string | null;
+  chunkIndex: number;
+  chunkKey: string;
+  section: string | null;
+  headingPath: string[];
+  page: number | null;
+  pageStart: number | null;
+  pageEnd: number | null;
+  textContent: string;
+  charCount: number;
+  tokenEstimate: number;
+  contentHash: string;
+  trustLevel: string;
   createdAt: string;
 }
 
@@ -216,6 +260,21 @@ export interface DataRepository {
     userId: string,
     limit?: number
   ): Promise<IngestedDocumentRecord[]>;
+  getIngestedDocument?(userId: string, documentId: string): Promise<IngestedDocumentRecord | null>;
+  deleteIngestedDocument?(userId: string, documentId: string): Promise<boolean>;
+
+  /** v1.2 chunk persistence (optional — engines degrade to in-memory safely). */
+  recordDocumentChunks?(
+    userId: string,
+    documentId: string,
+    chunks: Array<Omit<DocumentChunkRecord, 'id' | 'documentId' | 'createdAt'>>
+  ): Promise<number>;
+  listDocumentChunks?(
+    userId: string,
+    documentId: string,
+    limit?: number
+  ): Promise<DocumentChunkRecord[]>;
+  deleteDocumentChunks?(userId: string, documentId: string): Promise<number>;
 
   listProactiveWorkflows?(userId: string): Promise<ProactiveWorkflowRecord[]>;
   createProactiveWorkflow?(

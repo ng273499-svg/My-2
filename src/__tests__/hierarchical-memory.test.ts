@@ -503,7 +503,7 @@ describe('JARVIS-X v0.5 — Advanced Hierarchical Memory Engine', () => {
     expect(res2.followUpMessage?.content).toContain('superseded 1 older contradicting record');
 
     const snapshot = await jarvis.getSystemSnapshot();
-    expect(snapshot.version).toBe('1.1.0-coding-engine');
+    expect(snapshot.version).toBe('1.2.0-document-intelligence');
     expect(snapshot.memory.supersededEntriesCount).toBeGreaterThanOrEqual(1);
   });
 });

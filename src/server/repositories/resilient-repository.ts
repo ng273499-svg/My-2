@@ -13,6 +13,7 @@ import type {
   AgentTaskRecord,
   ConnectedToolRecord,
   DataRepository,
+  DocumentChunkRecord,
   IngestedDocumentRecord,
   ListMemoriesFilter,
   MemoryUpdatePatch,
@@ -265,6 +266,62 @@ export class ResilientDataRepository implements DataRepository {
         return this.fallback.listIngestedDocuments(userId, limit);
       }
       return r.listIngestedDocuments(userId, limit);
+    });
+  }
+
+  getIngestedDocument(
+    userId: string,
+    documentId: string
+  ): Promise<IngestedDocumentRecord | null> {
+    return this.run((r) => {
+      if (!r.getIngestedDocument) {
+        return this.fallback.getIngestedDocument!(userId, documentId);
+      }
+      return r.getIngestedDocument(userId, documentId);
+    });
+  }
+
+  deleteIngestedDocument(userId: string, documentId: string): Promise<boolean> {
+    return this.run((r) => {
+      if (!r.deleteIngestedDocument) {
+        return this.fallback.deleteIngestedDocument!(userId, documentId);
+      }
+      return r.deleteIngestedDocument(userId, documentId);
+    });
+  }
+
+  recordDocumentChunks(
+    userId: string,
+    documentId: string,
+    chunks: Array<Omit<DocumentChunkRecord, 'id' | 'documentId' | 'createdAt'>>
+  ): Promise<number> {
+    return this.run((r) => {
+      if (!r.recordDocumentChunks) {
+        return this.fallback.recordDocumentChunks!(userId, documentId, chunks);
+      }
+      return r.recordDocumentChunks(userId, documentId, chunks);
+    });
+  }
+
+  listDocumentChunks(
+    userId: string,
+    documentId: string,
+    limit?: number
+  ): Promise<DocumentChunkRecord[]> {
+    return this.run((r) => {
+      if (!r.listDocumentChunks) {
+        return this.fallback.listDocumentChunks!(userId, documentId, limit);
+      }
+      return r.listDocumentChunks(userId, documentId, limit);
+    });
+  }
+
+  deleteDocumentChunks(userId: string, documentId: string): Promise<number> {
+    return this.run((r) => {
+      if (!r.deleteDocumentChunks) {
+        return this.fallback.deleteDocumentChunks!(userId, documentId);
+      }
+      return r.deleteDocumentChunks(userId, documentId);
     });
   }
 

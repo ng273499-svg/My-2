@@ -1,4 +1,8 @@
 import { CodingEngine, createCodingEngine } from '@/core/coding-engine';
+import {
+  DocumentIntelligenceEngine,
+  type MemoryIngestSink,
+} from '@/core/document-intelligence';
 import type { CodingTaskInput, CodingTaskResult } from '@/core/coding-engine';
 import { AIModelRouter } from '@/core/modules/ai-model-router';
 import { ContextEmotionEngine } from '@/core/modules/context-emotion-engine';
@@ -44,6 +48,9 @@ import type {
 import type { ConnectedToolRecord, DataRepository } from '@/server/repositories/types';
 import type { SupabaseConnectionDiagnostics } from '@/server/supabase/client';
 
+/** Current JARVIS-X core version string. */
+export const JARVIS_CORE_VERSION = '1.2.0-document-intelligence';
+
 const DEFAULT_ACTOR: AuthSessionStatus = {
   authenticated: false,
   userId: DEFAULT_GUEST_USER_ID,
@@ -74,6 +81,8 @@ export class JarvisCore {
 
   // Production Core Runtime components
   public readonly codingEngine: CodingEngine;
+  /** JARVIS-X v1.2.0 Grounded Document Intelligence + Hybrid RAG engine. */
+  public readonly documentEngine: DocumentIntelligenceEngine;
   public readonly capabilityRegistry: CapabilityRegistry;
   public readonly specialistRegistry: SpecialistRegistry;
   public readonly runtimeMemoryBridge: RuntimeMemoryBridge;
@@ -89,7 +98,12 @@ export class JarvisCore {
       authenticated?: boolean
     ) => Promise<SupabaseConnectionDiagnostics> | SupabaseConnectionDiagnostics,
     private readonly actor: AuthSessionStatus = DEFAULT_ACTOR,
-    sharedPendingPermissions?: Map<string, PermissionRequest>
+    sharedPendingPermissions?: Map<string, PermissionRequest>,
+    runtimeOptions?: {
+      /** Shared process-wide document engine (server wiring) — keeps ingested
+       * documents available across request-scoped JarvisCore instances. */
+      documentEngine?: DocumentIntelligenceEngine;
+    }
   ) {
     this.activeUserId = actor.userId;
     this.conversationEngine = new ConversationEngine();
@@ -114,6 +128,10 @@ export class JarvisCore {
 
     // Wire JARVIS-X v1.1.0 Coding & Software Engineering Engine
     this.codingEngine = createCodingEngine(process.cwd(), { maxRepairIterations: 3 });
+
+    // Wire JARVIS-X v1.2.0 Grounded Document Intelligence + Hybrid RAG Engine
+    this.documentEngine =
+      runtimeOptions?.documentEngine ?? new DocumentIntelligenceEngine();
 
     // Wire Core Runtime Orchestrator
     this.capabilityRegistry = new CapabilityRegistry({
@@ -363,7 +381,7 @@ export class JarvisCore {
     }));
 
     return {
-      version: '1.1.0-coding-engine',
+      version: JARVIS_CORE_VERSION,
       coreState:
         supabaseDiag.serverReachability === 'degraded_unreachable' ? 'degraded' : 'online',
       serverTimestamp: new Date().toISOString(),
@@ -414,7 +432,178 @@ export class JarvisCore {
         externalModelsConfigured: externalConfigured,
         proactiveEnabled: preferences.proactiveAssistanceEnabled,
       }),
+      documentIntelligence: this.documentIntelligenceSummary(),
     };
+  }
+
+  /** Concise, non-secret document intelligence status for the HUD/snapshot. */
+  documentIntelligenceSummary() {
+    const embedding = this.documentEngine.embeddingStatus();
+    const documents = this.documentEngine.listDocuments(this.activeUserId);
+    const lifecycleCounts: Record<string, number> = {};
+    for (const doc of documents) {
+      lifecycleCounts[doc.lifecycle] = (lifecycleCounts[doc.lifecycle] ?? 0) + 1;
+    }
+    return {
+      version: '1.2.0-document-intelligence',
+      documentCount: documents.length,
+      indexedChunkCount: this.documentEngine.retrievableChunkCount(this.activeUserId),
+      embeddingMode: embedding.mode,
+      embeddingProviderId: embedding.providerId,
+      embeddingHonestNote: embedding.honestNote,
+      rerankingMode: this.documentEngine.reranking.mode,
+      parserCapabilities: this.documentEngine.parserCapabilities().map((c) => ({
+        format: c.format,
+        status: c.status,
+        parser: c.parser,
+        notes: c.notes,
+      })),
+      lifecycleCounts,
+    };
+  }
+
+  /**
+   * =========================================================================
+   * JARVIS-X v1.2.0 — Secure Grounded Document Intelligence interface
+   * =========================================================================
+   * Owner-only. Owner identity is ALWAYS resolved server-side from the
+   * authenticated session — a client-supplied owner ID is never trusted.
+   * Voice alone is never identity proof.
+   */
+
+  private documentAccessError(
+    action: string
+  ): { ok: false; errorCode: string; error: string } | null {
+    if (!this.actor.authenticated) {
+      return {
+        ok: false,
+        errorCode: 'UNAUTHORIZED_ACCESS',
+        error: `${action} requires an authenticated owner session. Guest/voice-only sessions are never granted document access.`,
+      };
+    }
+    return null;
+  }
+
+  async ingestDocument(input: {
+    fileName: string;
+    mimeType: string;
+    bytes?: Uint8Array;
+    textContent?: string;
+    projectId?: string | null;
+    source?: 'upload' | 'camera' | 'workspace' | 'url_import';
+  }) {
+    const denied = this.documentAccessError('Document ingestion');
+    if (denied) return denied;
+
+    const sink: MemoryIngestSink = async (ownerId, chunk, meta) => {
+      // Document evidence is written to the `knowledge` scope, explicitly
+      // tagged as unverified evidence — never as a verified personal fact.
+      const outcome = await this.memoryManager.ingestKnowledgeChunk(ownerId, chunk.text, {
+        sourceLabel: meta.sourceLabel,
+        projectId: meta.projectId,
+        tags: meta.tags,
+      });
+      return { entryId: outcome.entry?.id };
+    };
+
+    return this.documentEngine.ingest({
+      ownerId: this.activeUserId,
+      fileName: input.fileName,
+      mimeType: input.mimeType,
+      bytes: input.bytes,
+      textContent: input.textContent,
+      projectId: input.projectId ?? null,
+      source: input.source ?? 'upload',
+      memorySink: sink,
+    });
+  }
+
+  async queryDocuments(input: {
+    query: string;
+    projectId?: string | null;
+    documentIds?: string[];
+    includeAllProjects?: boolean;
+    topK?: number;
+  }) {
+    const denied = this.documentAccessError('Document query');
+    if (denied) return denied;
+
+    return this.documentEngine.query({
+      ownerId: this.activeUserId,
+      query: input.query,
+      projectId: input.projectId ?? null,
+      documentIds: input.documentIds,
+      includeAllProjects: input.includeAllProjects ?? false,
+      topK: input.topK,
+    });
+  }
+
+  async summarizeDocuments(input: {
+    documentIds: string[];
+    kind: 'quick' | 'detailed' | 'section' | 'key_points' | 'action_items' | 'technical' | 'compare';
+  }) {
+    const denied = this.documentAccessError('Document summarization');
+    if (denied) return denied;
+
+    if (!Array.isArray(input.documentIds) || input.documentIds.length === 0) {
+      return {
+        ok: false as const,
+        errorCode: 'INVALID_INPUT',
+        error: 'At least one document id is required.',
+      };
+    }
+
+    return this.documentEngine.summarize({
+      ownerId: this.activeUserId,
+      documentIds: input.documentIds.slice(0, 20),
+      kind: input.kind,
+    });
+  }
+
+  async listDocuments(projectId?: string | null) {
+    const denied = this.documentAccessError('Document listing');
+    if (denied) return denied;
+    return {
+      ok: true as const,
+      documents: this.documentEngine.listDocuments(this.activeUserId, { projectId }),
+    };
+  }
+
+  async getDocumentMetadata(documentId: string) {
+    const denied = this.documentAccessError('Document access');
+    if (denied) return denied;
+    const document = this.documentEngine.getDocument(this.activeUserId, documentId);
+    if (!document) {
+      return {
+        ok: false as const,
+        errorCode: 'NOT_FOUND',
+        error: 'Document not found for this owner.',
+      };
+    }
+    return { ok: true as const, document };
+  }
+
+  async deleteDocument(documentId: string) {
+    const denied = this.documentAccessError('Document deletion');
+    if (denied) return denied;
+
+    const result = await this.documentEngine.removeDocument(this.activeUserId, documentId, {
+      memoryRevoker: (memoryEntryId) =>
+        this.memoryManager.deleteMemory(this.activeUserId, memoryEntryId),
+    });
+    if (result.ok) {
+      await this.permissionSecurityManager.evaluate({
+        userId: this.activeUserId,
+        conversationId: normalizeConversationId(undefined),
+        actionCode: 'DOCUMENT_DELETION',
+        actionTitle: 'Document Removal (chunks revoked)',
+        targetResource: `document:${documentId}`,
+        tier: 'CONFIRMATION_REQUIRED',
+        summary: 'Owner requested deletion of an ingested document and its retrievable chunks.',
+        pendingPayload: { documentId },
+      });
+    }
+    return result;
   }
 
   /**
@@ -725,6 +914,30 @@ export class JarvisCore {
       verificationPreference: input.verificationPreference ?? 'standard',
       maxRepairIterations: input.maxRepairIterations,
       signal: input.signal,
+      // v1.2 integration: ground the plan in authorized spec evidence only.
+      specRetriever: async (specGoal, specOptions) => {
+        const evidence = await this.documentEngine.query({
+          ownerId: this.activeUserId,
+          query: specGoal,
+          projectId: specOptions.projectId,
+          includeAllProjects: specOptions.projectId === null,
+          topK: 5,
+        });
+        if (!evidence.ok || !evidence.answer) return [];
+        return evidence.answer.citations.map((citation) => {
+          const chunk = evidence.retrieval?.selected.find(
+            (s) => s.chunk.chunkId === citation.chunkId
+          );
+          return {
+            documentId: citation.documentId,
+            documentTitle: citation.documentTitle,
+            chunkId: citation.chunkId,
+            locationLabel: citation.locationLabel,
+            excerpt: chunk?.chunk.text.slice(0, 600) ?? '',
+            trustLevel: chunk?.chunk.trustLevel ?? 'untrusted_external',
+          };
+        });
+      },
     });
 
     // Persist reusable project knowledge into hierarchical memory (no secrets).

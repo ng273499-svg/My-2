@@ -19,11 +19,25 @@ const AnalyzeFileSchema = z.object({
 
 export async function GET(request: Request) {
   try {
-    const { actor, repository } = await getJarvisCoreForRequest(request);
+    const { actor, repository, jarvis } = await getJarvisCoreForRequest(request);
     const documents = await repository.listIngestedDocuments(actor.userId, 25);
+
+    // v1.2: live document-intelligence state for the authenticated owner only.
+    const workspace = actor.authenticated ? jarvis.listDocuments() : null;
+    const liveDocuments =
+      workspace && 'documents' in workspace ? workspace.documents : [];
+
     return NextResponse.json({
       ok: true,
       documents,
+      // In-process grounded intelligence state (honest about parser coverage).
+      intelligence: {
+        version: '1.2.0-document-intelligence',
+        documents: liveDocuments,
+        embedding: jarvis.documentEngine.embeddingStatus(),
+        rerankingMode: jarvis.documentEngine.reranking.mode,
+        parserCapabilities: jarvis.documentEngine.parserCapabilities(),
+      },
     });
   } catch (error) {
     const message =

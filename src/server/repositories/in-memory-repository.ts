@@ -16,6 +16,7 @@ import type {
   AgentTaskRecord,
   ConnectedToolRecord,
   DataRepository,
+  DocumentChunkRecord,
   IngestedDocumentRecord,
   ListMemoriesFilter,
   MemoryUpdatePatch,
@@ -52,6 +53,7 @@ interface UserPartition {
   permissionRecords: PermissionRecord[];
   auditLogs: AuditLogEntry[];
   ingestedDocuments: IngestedDocumentRecord[];
+  documentChunks: DocumentChunkRecord[];
   proactiveWorkflows: ProactiveWorkflowRecord[];
 }
 
@@ -158,6 +160,7 @@ export class InMemorySessionRepository implements DataRepository {
         tasks: [],
         permissionRecords: [],
         ingestedDocuments: [],
+        documentChunks: [],
         proactiveWorkflows: [],
         auditLogs: [
           {
@@ -643,6 +646,69 @@ export class InMemorySessionRepository implements DataRepository {
     limit = 20
   ): Promise<IngestedDocumentRecord[]> {
     return this.getPartition(userId).ingestedDocuments.slice(0, limit);
+  }
+
+  async getIngestedDocument(
+    userId: string,
+    documentId: string
+  ): Promise<IngestedDocumentRecord | null> {
+    const found = this.getPartition(userId).ingestedDocuments.find((d) => d.id === documentId);
+    return found ? { ...found } : null;
+  }
+
+  async deleteIngestedDocument(userId: string, documentId: string): Promise<boolean> {
+    const part = this.getPartition(userId);
+    const index = part.ingestedDocuments.findIndex((d) => d.id === documentId);
+    if (index === -1) return false;
+    const [removed] = part.ingestedDocuments.splice(index, 1);
+    // Revoke retrievable chunks in the same transaction-like step.
+    part.documentChunks = part.documentChunks.filter((c) => c.documentId !== documentId);
+    await this.appendAuditLog(userId, {
+      eventType: 'file_intelligence.removed',
+      entityType: 'memory',
+      entityId: documentId,
+      severity: 'info',
+      summary: `Removed document "${removed.fileName}" and revoked its retrievable chunks.`,
+    });
+    return true;
+  }
+
+  async recordDocumentChunks(
+    userId: string,
+    documentId: string,
+    chunks: Array<Omit<DocumentChunkRecord, 'id' | 'documentId' | 'createdAt'>>
+  ): Promise<number> {
+    const part = this.getPartition(userId);
+    let inserted = 0;
+    for (const chunk of chunks) {
+      part.documentChunks.push({
+        ...chunk,
+        id: generateUuid(),
+        documentId,
+        createdAt: new Date().toISOString(),
+      });
+      inserted += 1;
+    }
+    return inserted;
+  }
+
+  async listDocumentChunks(
+    userId: string,
+    documentId: string,
+    limit = 500
+  ): Promise<DocumentChunkRecord[]> {
+    return this.getPartition(userId)
+      .documentChunks.filter((c) => c.documentId === documentId)
+      .sort((a, b) => a.chunkIndex - b.chunkIndex)
+      .slice(0, limit)
+      .map((c) => ({ ...c }));
+  }
+
+  async deleteDocumentChunks(userId: string, documentId: string): Promise<number> {
+    const part = this.getPartition(userId);
+    const before = part.documentChunks.length;
+    part.documentChunks = part.documentChunks.filter((c) => c.documentId !== documentId);
+    return before - part.documentChunks.length;
   }
 
   async listProactiveWorkflows(userId: string): Promise<ProactiveWorkflowRecord[]> {

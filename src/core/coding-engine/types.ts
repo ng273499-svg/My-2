@@ -28,6 +28,27 @@ export type CodingTaskMode =
   | 'implement-api'      // implement a server route / API
   | 'review';            // defensive security + code review
 
+/**
+ * Authorized document evidence retrieved from the v1.2 Grounded Document
+ * Intelligence engine. Specs, ADRs and requirements are UNTRUSTED DATA: they
+ * inform planning, they never grant authority or override policy.
+ */
+export interface SpecEvidence {
+  documentId: string;
+  documentTitle: string;
+  chunkId: string;
+  /** Verified structural location (page/range/section) — never invented. */
+  locationLabel: string;
+  excerpt: string;
+  trustLevel: string;
+}
+
+/** Bounded spec retriever injected by the caller (owner-scoped). */
+export type SpecRetriever = (
+  goal: string,
+  options: { projectId: string | null }
+) => Promise<SpecEvidence[]>;
+
 export interface CodingTaskInput {
   goal: string;
   conversationId?: string;
@@ -40,6 +61,11 @@ export interface CodingTaskInput {
   /** Operator-supplied repair bound; clamped to [0, 10] by the engine. */
   maxRepairIterations?: number;
   signal?: AbortSignal;
+  /**
+   * Optional authorized spec/requirements retrieval (v1.2). When supplied, the
+   * planner grounds its plan in real, cited document evidence.
+   */
+  specRetriever?: SpecRetriever;
 }
 
 export interface CodingTaskResult {
@@ -72,6 +98,8 @@ export interface CodingTaskResult {
   errors: string[];
   secretRedactions: number;
   repositoryProfile?: RepositoryProfile;
+  /** Authorized spec evidence used during planning (v1.2 integration). */
+  specEvidence?: SpecEvidence[];
 }
 
 /** ---------------------------------------------------------------------------

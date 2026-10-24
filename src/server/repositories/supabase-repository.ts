@@ -19,6 +19,7 @@ import type {
   AgentTaskRecord,
   ConnectedToolRecord,
   DataRepository,
+  DocumentChunkRecord,
   IngestedDocumentRecord,
   ListMemoriesFilter,
   MemoryUpdatePatch,
@@ -1069,6 +1070,15 @@ export class SupabaseDataRepository implements DataRepository {
         metadata:
           (doc.metadata as Database['public']['Tables']['ingested_documents']['Insert']['metadata']) ??
           {},
+        content_hash: doc.contentHash ?? null,
+        page_count: doc.pageCount ?? 0,
+        lifecycle: doc.lifecycle ?? 'READY',
+        parser: doc.parser ?? null,
+        parser_version: doc.parserVersion ?? null,
+        embedding_mode: doc.embeddingMode ?? null,
+        ocr_required: doc.ocrRequired ?? false,
+        page_provenance_available: doc.pageProvenanceAvailable ?? false,
+        trust_level: doc.trustLevel ?? 'untrusted_external',
       })
       .select('*')
       .single();
@@ -1090,6 +1100,15 @@ export class SupabaseDataRepository implements DataRepository {
           ? (data.metadata as Record<string, unknown>)
           : {},
       createdAt: data.created_at,
+      contentHash: data.content_hash ?? null,
+      pageCount: data.page_count ?? 0,
+      lifecycle: data.lifecycle ?? 'READY',
+      parser: data.parser ?? null,
+      parserVersion: data.parser_version ?? null,
+      embeddingMode: data.embedding_mode ?? null,
+      ocrRequired: data.ocr_required ?? false,
+      pageProvenanceAvailable: data.page_provenance_available ?? false,
+      trustLevel: data.trust_level ?? 'untrusted_external',
     };
   }
 
@@ -1121,8 +1140,159 @@ export class SupabaseDataRepository implements DataRepository {
             ? (row.metadata as Record<string, unknown>)
             : {},
         createdAt: row.created_at,
+        contentHash: row.content_hash ?? null,
+        pageCount: row.page_count ?? 0,
+        lifecycle: row.lifecycle ?? 'READY',
+        parser: row.parser ?? null,
+        parserVersion: row.parser_version ?? null,
+        embeddingMode: row.embedding_mode ?? null,
+        ocrRequired: row.ocr_required ?? false,
+        pageProvenanceAvailable: row.page_provenance_available ?? false,
+        trustLevel: row.trust_level ?? 'untrusted_external',
       })
     );
+  }
+
+  private mapDocumentRow(
+    row: Database['public']['Tables']['ingested_documents']['Row']
+  ): IngestedDocumentRecord {
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      fileName: row.file_name,
+      mimeType: row.mime_type,
+      formatKind: row.format_kind,
+      sizeBytes: row.size_bytes,
+      chunkCount: row.chunk_count,
+      injectionFlagged: row.injection_flagged,
+      summary: row.summary,
+      metadata:
+        typeof row.metadata === 'object' && row.metadata !== null
+          ? (row.metadata as Record<string, unknown>)
+          : {},
+      createdAt: row.created_at,
+      contentHash: row.content_hash ?? null,
+      pageCount: row.page_count ?? 0,
+      lifecycle: row.lifecycle ?? 'READY',
+      parser: row.parser ?? null,
+      parserVersion: row.parser_version ?? null,
+      embeddingMode: row.embedding_mode ?? null,
+      ocrRequired: row.ocr_required ?? false,
+      pageProvenanceAvailable: row.page_provenance_available ?? false,
+      trustLevel: row.trust_level ?? 'untrusted_external',
+    };
+  }
+
+  async getIngestedDocument(
+    userId: string,
+    documentId: string
+  ): Promise<IngestedDocumentRecord | null> {
+    const { data, error } = await this.table('ingested_documents')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('id', documentId)
+      .is('deleted_at', null)
+      .maybeSingle();
+
+    assertSupabaseResult(error, 'getIngestedDocument');
+    if (!data) return null;
+    return this.mapDocumentRow(data);
+  }
+
+  async deleteIngestedDocument(userId: string, documentId: string): Promise<boolean> {
+    // Chunks are removed by the ON DELETE CASCADE foreign key, which is itself
+    // protected by owner-scoped RLS delete policies.
+    const { error, count } = await this.table('ingested_documents')
+      .delete({ count: 'exact' })
+      .eq('user_id', userId)
+      .eq('id', documentId);
+
+    assertSupabaseResult(error, 'deleteIngestedDocument');
+    return (count ?? 0) > 0;
+  }
+
+  async recordDocumentChunks(
+    userId: string,
+    documentId: string,
+    chunks: Array<Omit<DocumentChunkRecord, 'id' | 'documentId' | 'createdAt'>>
+  ): Promise<number> {
+    if (chunks.length === 0) return 0;
+
+    const rows = chunks.map((chunk) => ({
+      document_id: documentId,
+      user_id: userId,
+      project_id: chunk.projectId ?? null,
+      chunk_index: chunk.chunkIndex,
+      chunk_key: chunk.chunkKey,
+      section: chunk.section ?? null,
+      heading_path: chunk.headingPath,
+      page: chunk.page ?? null,
+      page_start: chunk.pageStart ?? null,
+      page_end: chunk.pageEnd ?? null,
+      text_content: chunk.textContent,
+      char_count: chunk.charCount,
+      token_estimate: chunk.tokenEstimate,
+      content_hash: chunk.contentHash,
+      trust_level: chunk.trustLevel,
+    }));
+
+    // Bounded batches keep every request small.
+    let inserted = 0;
+    for (let i = 0; i < rows.length; i += 200) {
+      const batch = rows.slice(i, i + 200);
+      const { error, count } = await this.table('document_chunks').insert(batch, {
+        count: 'exact',
+      });
+      assertSupabaseResult(error, 'recordDocumentChunks');
+      inserted += count ?? batch.length;
+    }
+    return inserted;
+  }
+
+  async listDocumentChunks(
+    userId: string,
+    documentId: string,
+    limit = 500
+  ): Promise<DocumentChunkRecord[]> {
+    const { data, error } = await this.table('document_chunks')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('document_id', documentId)
+      .order('chunk_index', { ascending: true })
+      .limit(limit);
+
+    assertSupabaseResult(error, 'listDocumentChunks');
+
+    return (data ?? []).map(
+      (row: Database['public']['Tables']['document_chunks']['Row']) => ({
+        id: row.id,
+        documentId: row.document_id,
+        projectId: row.project_id,
+        chunkIndex: row.chunk_index,
+        chunkKey: row.chunk_key,
+        section: row.section,
+        headingPath: row.heading_path ?? [],
+        page: row.page,
+        pageStart: row.page_start,
+        pageEnd: row.page_end,
+        textContent: row.text_content,
+        charCount: row.char_count,
+        tokenEstimate: row.token_estimate,
+        contentHash: row.content_hash,
+        trustLevel: row.trust_level,
+        createdAt: row.created_at,
+      })
+    );
+  }
+
+  async deleteDocumentChunks(userId: string, documentId: string): Promise<number> {
+    const { error, count } = await this.table('document_chunks')
+      .delete({ count: 'exact' })
+      .eq('user_id', userId)
+      .eq('document_id', documentId);
+
+    assertSupabaseResult(error, 'deleteDocumentChunks');
+    return count ?? 0;
   }
 
   async listProactiveWorkflows(userId: string): Promise<ProactiveWorkflowRecord[]> {

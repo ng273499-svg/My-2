@@ -237,13 +237,13 @@ export class CapabilityRegistry {
         id: 'file_intelligence',
         name: 'Document & File Intelligence',
         description:
-          'Parses attached Markdown, CSV/TSV, JSON, code, and text documents locally with quarantined knowledge chunking; binary PDF/Office OCR is NOT_AVAILABLE.',
+          'v1.2 Grounded Document Intelligence: real PDF/DOCX text extraction with page-level provenance, hybrid retrieval, reranking, citations and claim verification via POST /api/jarvis/files/ingest and /query. In-chat attachments still use the quarantined text/MD/CSV/JSON/code path.',
         availability: 'PARTIAL_LOCAL',
         defaultRiskLevel: 'LOW_RISK',
         countsAsToolCall: true,
         supportsModalities: ['text'],
         missingDependencyNote:
-          'Structured text/MD/CSV/JSON/code parser active; binary PDF/Office OCR worker is NOT_AVAILABLE.',
+          'PDF (text-based) and DOCX extraction are AVAILABLE through the document ingestion API; OCR for scanned/image documents is NOT_AVAILABLE.',
       },
       execute: async (ctx) => {
         const doc = ctx.documentAttachment;

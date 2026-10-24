@@ -180,4 +180,21 @@ export interface JarvisSystemSnapshot {
   permissionAudit: PermissionRecord[];
   auditLogs: AuditLogEntry[];
   proactiveAdvisories: ProactiveAdvisory[];
+  /** JARVIS-X v1.2.0 Grounded Document Intelligence status (additive). */
+  documentIntelligence?: {
+    version: string;
+    documentCount: number;
+    indexedChunkCount: number;
+    embeddingMode: string;
+    embeddingProviderId: string;
+    embeddingHonestNote: string;
+    rerankingMode: string;
+    parserCapabilities: Array<{
+      format: string;
+      status: string;
+      parser: string;
+      notes: string;
+    }>;
+    lifecycleCounts: Record<string, number>;
+  };
 }

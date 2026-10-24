@@ -21,6 +21,7 @@ import type {
   ParsedError,
   RepositoryProfile,
   SecurityFinding,
+  SpecEvidence,
   ToolchainInfo,
 } from './types';
 import { RepositoryProfiler } from './repository-profiler';
@@ -193,6 +194,30 @@ export class CodingEngine {
         );
       }
 
+      // === SPEC RETRIEVAL (v1.2 Grounded Document Intelligence) =========
+      // Authorized specs are UNTRUSTED DATA: they ground the plan, they never
+      // grant authority, alter permissions, or override security policy.
+      let specEvidence: SpecEvidence[] = [];
+      if (input.specRetriever) {
+        try {
+          const retrieved = await input.specRetriever(goalEval.sanitized, {
+            projectId: input.projectId ?? null,
+          });
+          // Bound the evidence and sanitize it as untrusted input.
+          specEvidence = retrieved.slice(0, 5).map((evidence) => ({
+            ...evidence,
+            excerpt: this.promptInjection.sanitize(evidence.excerpt).sanitized.slice(0, 600),
+          }));
+          if (specEvidence.length > 0) {
+            recordEvent('inspect', { filesInspected: specEvidence.length });
+          }
+        } catch {
+          warnings.push(
+            'Spec evidence retrieval failed; the plan was produced without document grounding.'
+          );
+        }
+      }
+
       // === INSPECT ===
       recordEvent('inspect');
       const profile = await this.profiler.profile();
@@ -233,6 +258,7 @@ export class CodingEngine {
           mode: input.mode,
           status: 'VERIFIED',
           planSummary: plan.steps.join(' → '),
+          specEvidence,
           filesInspected: [
             ...profile.entryPoints,
             ...profile.modulesComponents.slice(0, 30),
