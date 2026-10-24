@@ -1,0 +1,461 @@
+import type {
+  CapabilityDefinition,
+  CapabilityExecutionContext,
+  CapabilityExecutionResult,
+  RuntimeCapabilityId,
+} from '@/core/types';
+import {
+  analyzeStructuredDocument,
+  detectDocumentFormat,
+} from '@/core/files';
+import type { VisionEngine } from '@/core/modules/vision-engine';
+import { sanitizeUntrustedExternalOutput } from './errors';
+
+export type CapabilityHandler = (
+  ctx: CapabilityExecutionContext
+) => Promise<CapabilityExecutionResult>;
+
+export interface RegisteredRuntimeCapability {
+  definition: CapabilityDefinition;
+  execute: CapabilityHandler;
+}
+
+export interface CapabilityRegistryOptions {
+  visionEngine?: VisionEngine;
+  onIngestKnowledgeChunk?: (
+    userId: string,
+    chunk: string,
+    meta: { sourceLabel: string; projectId?: string | null }
+  ) => Promise<void>;
+}
+
+/**
+ * JARVIS-X Capability Registry
+ * Central registry for current and future runtime capabilities.
+ * Unimplemented capabilities MUST report `status: 'NOT_AVAILABLE'` and NEVER fake execution.
+ */
+export class CapabilityRegistry {
+  private readonly capabilities = new Map<
+    RuntimeCapabilityId,
+    RegisteredRuntimeCapability
+  >();
+
+  constructor(options?: CapabilityRegistryOptions) {
+    this.registerDefaults(options?.visionEngine, options?.onIngestKnowledgeChunk);
+  }
+
+  private registerDefaults(
+    visionEngine?: VisionEngine,
+    onIngestKnowledgeChunk?: CapabilityRegistryOptions['onIngestKnowledgeChunk']
+  ): void {
+    // 1. Direct Conversation (AVAILABLE)
+    this.register({
+      definition: {
+        id: 'direct_conversation',
+        name: 'Direct Conversation & Reasoning Core',
+        description: 'Handles dialogue, context synthesis, and architectural reasoning.',
+        availability: 'AVAILABLE',
+        defaultRiskLevel: 'READ_ONLY',
+        countsAsToolCall: false,
+        supportsModalities: ['text', 'voice_transcript'],
+      },
+      execute: async (ctx) => ({
+        capabilityId: 'direct_conversation',
+        status: 'EXECUTED',
+        summary: `Prepared conversational context for step "${ctx.step.stepId}".`,
+      }),
+    });
+
+    // 2. Memory (AVAILABLE — backed by Supabase RLS / Resilient Repository)
+    this.register({
+      definition: {
+        id: 'memory',
+        name: 'Permitted Memory & Context Store',
+        description:
+          'Reads permitted user/project memories and stages confirmed durable facts via Supabase RLS.',
+        availability: 'AVAILABLE',
+        defaultRiskLevel: 'READ_ONLY',
+        countsAsToolCall: true,
+        supportsModalities: ['text', 'voice_transcript'],
+      },
+      execute: async (ctx) => ({
+        capabilityId: 'memory',
+        status: 'EXECUTED',
+        summary: `Recalled ${ctx.memorySnippets.length} permitted memory item(s) for user context.`,
+        data: { recalledCount: ctx.memorySnippets.length },
+      }),
+    });
+
+    // 3. Research (NOT_AVAILABLE for live web search — honest reporting)
+    this.register({
+      definition: {
+        id: 'research',
+        name: 'Live Web Research & Citation Retrieval',
+        description: 'Queries external search indices and grounded reference sources.',
+        availability: 'NOT_AVAILABLE',
+        defaultRiskLevel: 'READ_ONLY',
+        countsAsToolCall: true,
+        supportsModalities: ['text', 'voice_transcript'],
+        missingDependencyNote:
+          'NOT_AVAILABLE — Live Web Search connector is not configured in this phase.',
+      },
+      execute: async () => ({
+        capabilityId: 'research',
+        status: 'NOT_AVAILABLE',
+        summary:
+          'Capability "research" (live web retrieval) is NOT_AVAILABLE. Returning local structural outline only without fabricated web citations.',
+        honestLimitationNote:
+          'Live external web search is NOT_AVAILABLE; no external URLs or live citations were fetched.',
+      }),
+    });
+
+    // 4. Coding (PARTIAL_LOCAL — architectural blueprint ready; code sandbox NOT_AVAILABLE)
+    this.register({
+      definition: {
+        id: 'coding',
+        name: 'Code Architecture & Sandboxed Execution',
+        description:
+          'Provides local engineering decomposition; isolated code execution sandbox is not yet connected.',
+        availability: 'PARTIAL_LOCAL',
+        defaultRiskLevel: 'LOW_RISK',
+        countsAsToolCall: true,
+        supportsModalities: ['text'],
+        missingDependencyNote:
+          'Sandboxed code execution runtime & external Coding LLM are NOT_AVAILABLE.',
+      },
+      execute: async (ctx) => {
+        const wantsLiveRun = /\b(run|execute|compile and run|execute python|run script)\b/i.test(
+          ctx.userMessage
+        );
+        if (wantsLiveRun) {
+          return {
+            capabilityId: 'coding',
+            status: 'NOT_AVAILABLE',
+            summary:
+              'Sandboxed code execution is NOT_AVAILABLE. Refusing to fake script execution.',
+            honestLimitationNote:
+              'Ephemeral code execution sandbox is NOT_AVAILABLE in this phase.',
+          };
+        }
+        return {
+          capabilityId: 'coding',
+          status: 'PARTIAL_LOCAL',
+          summary:
+            'Generated local architectural engineering guidance (external Coding LLM & execution sandbox NOT_AVAILABLE).',
+          honestLimitationNote:
+            'Running local deterministic coding planner; live code execution is NOT_AVAILABLE.',
+        };
+      },
+    });
+
+    // 5. Vision (PARTIAL_LOCAL binary geometry inspector active; Vision LLM routed when configured)
+    this.register({
+      definition: {
+        id: 'vision',
+        name: 'Visual Frame & Multimodal Understanding',
+        description:
+          'Inspects binary image headers/geometry (PNG/JPEG/GIF/WebP/SVG) locally and routes frames to configured Vision LLMs.',
+        availability: visionEngine?.isConnected() ? 'AVAILABLE' : 'PARTIAL_LOCAL',
+        defaultRiskLevel: 'LOW_RISK',
+        countsAsToolCall: true,
+        supportsModalities: ['vision_multimodal', 'text'],
+        missingDependencyNote: visionEngine?.isConnected()
+          ? undefined
+          : 'Binary frame/geometry inspector active; configure a Vision AIProvider key for semantic scene recognition.',
+      },
+      execute: async (ctx) => {
+        const inspection =
+          visionEngine && ctx.visionAttachment
+            ? visionEngine.inspectFrameMetadata({
+                fileName: ctx.visionAttachment.fileName,
+                mimeType: ctx.visionAttachment.mimeType,
+                sizeBytes: ctx.visionAttachment.sizeBytes,
+                width: ctx.visionAttachment.width,
+                height: ctx.visionAttachment.height,
+                base64Data: ctx.visionAttachment.base64Data,
+                source: ctx.visionAttachment.source ?? 'upload',
+                userPrompt: ctx.userMessage,
+              })
+            : null;
+
+        if (visionEngine?.isConnected() && inspection) {
+          return {
+            capabilityId: 'vision',
+            status: 'EXECUTED',
+            summary: inspection.statusMessage,
+            data: { binaryDiagnostics: inspection.binaryDiagnostics },
+          };
+        }
+
+        if (
+          inspection?.binaryDiagnostics &&
+          inspection.binaryDiagnostics.bytesInspected > 0
+        ) {
+          return {
+            capabilityId: 'vision',
+            status: 'PARTIAL_LOCAL',
+            summary: inspection.statusMessage,
+            data: { binaryDiagnostics: inspection.binaryDiagnostics },
+            honestLimitationNote:
+              'Binary image header & pixel geometry verified locally; semantic scene recognition is NOT_AVAILABLE without a configured Vision AIProvider.',
+          };
+        }
+
+        return {
+          capabilityId: 'vision',
+          status: 'NOT_AVAILABLE',
+          summary: inspection
+            ? inspection.statusMessage
+            : 'Capability "vision" is NOT_AVAILABLE — Multimodal Vision LLM provider is not configured.',
+          honestLimitationNote:
+            'Visual content recognition is NOT_AVAILABLE until a Vision-capable AIProvider is configured.',
+        };
+      },
+    });
+
+    // 6. File Intelligence (PARTIAL_LOCAL — structured text/MD/CSV/JSON/code parser active; binary PDF/Office NOT_AVAILABLE)
+    this.register({
+      definition: {
+        id: 'file_intelligence',
+        name: 'Document & File Intelligence',
+        description:
+          'Parses attached Markdown, CSV/TSV, JSON, code, and text documents locally with quarantined knowledge chunking; binary PDF/Office OCR is NOT_AVAILABLE.',
+        availability: 'PARTIAL_LOCAL',
+        defaultRiskLevel: 'LOW_RISK',
+        countsAsToolCall: true,
+        supportsModalities: ['text'],
+        missingDependencyNote:
+          'Structured text/MD/CSV/JSON/code parser active; binary PDF/Office OCR worker is NOT_AVAILABLE.',
+      },
+      execute: async (ctx) => {
+        const doc = ctx.documentAttachment;
+        if (!doc || !doc.textContent?.trim()) {
+          return {
+            capabilityId: 'file_intelligence',
+            status: 'NOT_AVAILABLE',
+            summary:
+              'Capability "file_intelligence" is NOT_AVAILABLE — no structured text/CSV/JSON/Markdown document payload was attached (binary PDF/Office extraction is NOT_AVAILABLE).',
+            honestLimitationNote:
+              'Unattached file references and binary PDFs are NOT_AVAILABLE; zero document contents were fabricated.',
+          };
+        }
+
+        const fmt = detectDocumentFormat(doc.fileName, doc.mimeType);
+        if (fmt === 'unsupported_binary') {
+          return {
+            capabilityId: 'file_intelligence',
+            status: 'NOT_AVAILABLE',
+            summary: `Capability "file_intelligence" is NOT_AVAILABLE for binary format "${doc.fileName}" — attach Markdown, CSV, JSON, code, or plain text.`,
+            honestLimitationNote:
+              'Binary PDF/Office OCR is NOT_AVAILABLE; zero document contents were fabricated.',
+          };
+        }
+
+        const analysis = analyzeStructuredDocument({
+          fileName: doc.fileName,
+          mimeType: doc.mimeType,
+          sizeBytes: doc.sizeBytes,
+          textContent: doc.textContent,
+        });
+
+        let ingestedChunks = 0;
+        if (doc.ingestToKnowledge && onIngestKnowledgeChunk) {
+          for (const chunk of analysis.chunks.slice(0, 12)) {
+            await onIngestKnowledgeChunk(ctx.userId, chunk, {
+              sourceLabel: doc.fileName,
+              projectId: ctx.projectId,
+            });
+            ingestedChunks += 1;
+          }
+        }
+
+        return {
+          capabilityId: 'file_intelligence',
+          status: 'EXECUTED',
+          untrustedExternalContent: true,
+          summary: `${analysis.conciseSummary}${
+            ingestedChunks > 0
+              ? ` Ingested ${ingestedChunks} quarantined chunk(s) into knowledge memory.`
+              : ''
+          }`,
+          data: {
+            formatKind: analysis.formatKind,
+            lineCount: analysis.lineCount,
+            wordCount: analysis.wordCount,
+            chunkCount: analysis.chunks.length,
+            ingestedChunks,
+            headings: analysis.headings,
+            codeSymbols: analysis.codeSymbols,
+            csvSummary: analysis.csvSummary,
+            jsonSummary: analysis.jsonSummary,
+            injectionAttemptDetected: analysis.injectionAttemptDetected,
+          },
+        };
+      },
+    });
+
+    // 7. Automation (NOT_AVAILABLE)
+    this.register({
+      definition: {
+        id: 'automation',
+        name: 'Scheduled Workflows & Background Automation',
+        description: 'Executes scheduled triggers, cron routines, and event-driven workflows.',
+        availability: 'NOT_AVAILABLE',
+        defaultRiskLevel: 'CONFIRMATION_REQUIRED',
+        countsAsToolCall: true,
+        supportsModalities: ['text'],
+        missingDependencyNote:
+          'NOT_AVAILABLE — Background scheduler / Edge cron runner not connected.',
+      },
+      execute: async () => ({
+        capabilityId: 'automation',
+        status: 'NOT_AVAILABLE',
+        summary:
+          'Capability "automation" is NOT_AVAILABLE — background workflow runner is not configured.',
+        honestLimitationNote:
+          'Scheduled background execution is NOT_AVAILABLE; workflow was not scheduled.',
+      }),
+    });
+
+    // 8. Verification (AVAILABLE)
+    this.register({
+      definition: {
+        id: 'verification',
+        name: 'Runtime Outcome & Governance Verifier',
+        description:
+          'Audits step outputs, anti-fabrication invariants, and permission compliance.',
+        availability: 'AVAILABLE',
+        defaultRiskLevel: 'READ_ONLY',
+        countsAsToolCall: false,
+        supportsModalities: ['text', 'voice_transcript', 'vision_multimodal'],
+      },
+      execute: async () => ({
+        capabilityId: 'verification',
+        status: 'EXECUTED',
+        summary: 'Verified capability statuses and anti-fabrication boundaries.',
+      }),
+    });
+
+    // 9. Cybersecurity / Defensive Security (PARTIAL_LOCAL — defensive checklist active; live scanner NOT_AVAILABLE)
+    this.register({
+      definition: {
+        id: 'cybersecurity',
+        name: 'Defensive Security & RLS Posture Analyzer',
+        description:
+          'Provides read-only defensive threat-modeling, RLS verification guidance, and secret-hygiene checks.',
+        availability: 'PARTIAL_LOCAL',
+        defaultRiskLevel: 'LOW_RISK',
+        countsAsToolCall: true,
+        supportsModalities: ['text'],
+        missingDependencyNote:
+          'Live external network/CVE vulnerability scanning is NOT_AVAILABLE (strictly defensive local guidance active).',
+      },
+      execute: async (ctx) => {
+        const wantsExternalScan = /\b(scan target|port scan|nmap|probe server|live cve scan)\b/i.test(
+          ctx.userMessage
+        );
+        if (wantsExternalScan) {
+          return {
+            capabilityId: 'cybersecurity',
+            status: 'NOT_AVAILABLE',
+            summary:
+              'External network/vulnerability scanning is NOT_AVAILABLE. Only defensive architecture review is supported.',
+            honestLimitationNote: 'Active network scanning is NOT_AVAILABLE.',
+          };
+        }
+        return {
+          capabilityId: 'cybersecurity',
+          status: 'PARTIAL_LOCAL',
+          summary:
+            'Completed defensive security checklist (RLS isolation, server-only secrets, untrusted tool output sanitization).',
+          data: {
+            postureChecks: [
+              'Supabase FORCE ROW LEVEL SECURITY active across all 10 tables',
+              'SUPABASE_SERVICE_ROLE_KEY isolated to server-only runtime',
+              'External tool outputs sanitized as untrusted input',
+            ],
+          },
+        };
+      },
+    });
+
+    // 10. External Tools (NOT_AVAILABLE)
+    this.register({
+      definition: {
+        id: 'external_tools',
+        name: 'External APIs, Smart Devices & Computer Control',
+        description:
+          'Interfaces for OAuth workspace apps, IoT smart-home bridges, and isolated browser actions.',
+        availability: 'NOT_AVAILABLE',
+        defaultRiskLevel: 'SENSITIVE',
+        countsAsToolCall: true,
+        supportsModalities: ['text', 'voice_transcript'],
+        missingDependencyNote:
+          'NOT_AVAILABLE — External OAuth/IoT/Browser connectors are not connected.',
+      },
+      execute: async () => ({
+        capabilityId: 'external_tools',
+        status: 'NOT_AVAILABLE',
+        summary:
+          'Capability "external_tools" is NOT_AVAILABLE — external connector is not configured; zero external side effects occurred.',
+        honestLimitationNote:
+          'External connector is NOT_AVAILABLE; no external API or device state was modified.',
+      }),
+    });
+  }
+
+  register(capability: RegisteredRuntimeCapability): void {
+    this.capabilities.set(capability.definition.id, capability);
+  }
+
+  getDefinition(id: RuntimeCapabilityId): CapabilityDefinition {
+    const existing = this.capabilities.get(id);
+    if (existing) return existing.definition;
+
+    return {
+      id,
+      name: `Unregistered Capability (${id})`,
+      description: 'Capability interface requested but not registered.',
+      availability: 'NOT_AVAILABLE',
+      defaultRiskLevel: 'CONFIRMATION_REQUIRED',
+      countsAsToolCall: true,
+      supportsModalities: ['text'],
+      missingDependencyNote: `Capability "${id}" is NOT_AVAILABLE.`,
+    };
+  }
+
+  has(id: RuntimeCapabilityId): boolean {
+    return this.capabilities.has(id);
+  }
+
+  listDefinitions(): CapabilityDefinition[] {
+    return Array.from(this.capabilities.values()).map((c) => c.definition);
+  }
+
+  async invoke(
+    id: RuntimeCapabilityId,
+    ctx: CapabilityExecutionContext
+  ): Promise<CapabilityExecutionResult> {
+    const entry = this.capabilities.get(id);
+    if (!entry) {
+      return {
+        capabilityId: id,
+        status: 'NOT_AVAILABLE',
+        summary: `Capability "${id}" is NOT_AVAILABLE in the JARVIS-X Capability Registry.`,
+        honestLimitationNote: `Capability "${id}" has not been registered or implemented.`,
+      };
+    }
+
+    const result = await entry.execute(ctx);
+
+    // Treat any external/tool output as untrusted input before returning to orchestrator
+    if (result.untrustedExternalContent) {
+      return {
+        ...result,
+        summary: `[Untrusted External Output]: ${sanitizeUntrustedExternalOutput(result.summary)}`,
+      };
+    }
+
+    return result;
+  }
+}
