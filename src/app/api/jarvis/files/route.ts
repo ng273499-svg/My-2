@@ -5,6 +5,7 @@ import {
   detectDocumentFormat,
 } from '@/core/files';
 import { getJarvisCoreForRequest } from '@/server/runtime';
+import { ensureDocumentsHydrated } from '@/server/document-engine';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,6 +22,10 @@ export async function GET(request: Request) {
   try {
     const { actor, repository, jarvis } = await getJarvisCoreForRequest(request);
     const documents = await repository.listIngestedDocuments(actor.userId, 25);
+
+    if (actor.authenticated) {
+      await ensureDocumentsHydrated(jarvis.documentEngine, actor.userId, repository);
+    }
 
     // v1.2: live document-intelligence state for the authenticated owner only.
     const workspace = actor.authenticated ? jarvis.listDocuments() : null;

@@ -25,6 +25,7 @@ import {
   ClaimVerifier,
   ConflictDetector,
   ContextAssembler,
+  deduplicateCandidates,
   DeterministicReranker,
   DocumentEmbeddingService,
   DocumentIndex,
@@ -1159,6 +1160,385 @@ describe('JARVIS-X v1.2 — Grounding, citations and verification', () => {
 });
 
 /* ==========================================================================
+ * Regressions found during independent end-to-end audit
+ * ======================================================================== */
+
+describe('JARVIS-X v1.2 — Cross-document conflict regressions', () => {
+  it('detects a contradiction between two near-identical documents end-to-end', async () => {
+    const engine = makeEngine();
+
+    await engine.ingest({
+      ownerId: 'owner-a',
+      fileName: 'policy-v1.md',
+      mimeType: 'text/markdown',
+      textContent: '# Policy\n\nEncryption at rest is required for all customer data stores.',
+    });
+    await engine.ingest({
+      ownerId: 'owner-a',
+      fileName: 'policy-v2.md',
+      mimeType: 'text/markdown',
+      textContent: '# Policy\n\nEncryption at rest is not required for all customer data stores.',
+    });
+
+    const result = await engine.query({
+      ownerId: 'owner-a',
+      query: 'is encryption at rest required for all customer data stores',
+    });
+
+    // The two documents are near-identical apart from the negation. Deduplication
+    // must never collapse one of them away.
+    expect(result.ok).toBe(true);
+    expect(result.answer!.conflicts.length).toBeGreaterThan(0);
+    expect(result.answer!.status).toBe('CONFLICTING_EVIDENCE');
+
+    const conflict = result.answer!.conflicts[0];
+    expect(conflict.positions).toHaveLength(2);
+    const docs = conflict.positions.map((p) => p.documentId);
+    expect(new Set(docs).size).toBe(2);
+    // Both sides are preserved verbatim — no silent choice.
+    expect(conflict.positions.some((p) => /is required/i.test(p.statement))).toBe(true);
+    expect(conflict.positions.some((p) => /not required/i.test(p.statement))).toBe(true);
+    expect(result.answer!.answer).toMatch(/Conflicting evidence detected/i);
+  });
+
+  it('keeps near-identical passages from different documents as separate sources', () => {
+    const chunk = (chunkId: string, documentId: string, text: string, hash: string) => ({
+      chunkId,
+      documentId,
+      ownerId: 'owner-a',
+      projectId: null,
+      section: 'Policy',
+      headingPath: ['Policy'],
+      page: null,
+      pageRange: null,
+      text,
+      charCount: text.length,
+      tokenEstimate: 10,
+      contentHash: hash,
+      trustLevel: 'untrusted_external' as const,
+      order: 0,
+      ingestedAt: '2026-10-01T00:00:00.000Z',
+    });
+
+    const shared = 'Encryption at rest is required for all customer data stores without exception.';
+    const candidates = [
+      scoreChunk({ chunk: chunk('a', 'doc-1', shared, 'h1'), hybridScore: 0.9 }),
+      scoreChunk({ chunk: chunk('b', 'doc-2', shared, 'h2'), hybridScore: 0.85 }),
+      // A true duplicate INSIDE one document must still collapse.
+      scoreChunk({ chunk: chunk('c', 'doc-1', shared, 'h1'), hybridScore: 0.8 }),
+    ];
+
+    const { kept, removed } = deduplicateCandidates(candidates);
+    expect(kept.map((k) => k.chunk.chunkId)).toEqual(['a', 'b']);
+    expect(removed).toBe(1);
+  });
+
+  it('bounds document fan-out and excludes marginal evidence', () => {
+    const makeChunk = (i: number, documentId: string, text: string) => ({
+      chunkId: `c-${i}`,
+      documentId,
+      ownerId: 'owner-a',
+      projectId: null,
+      section: null,
+      headingPath: [],
+      page: null,
+      pageRange: null,
+      text,
+      charCount: text.length,
+      tokenEstimate: 10,
+      contentHash: `hash-${i}`,
+      trustLevel: 'untrusted_external' as const,
+      order: i,
+      ingestedAt: '2026-10-01T00:00:00.000Z',
+    });
+
+    const selected = [
+      scoreChunk({ chunk: makeChunk(0, 'doc-1', 'Deployment region is ap-south-1.'), hybridScore: 0.9, rerankScore: 0.9 }),
+      scoreChunk({ chunk: makeChunk(1, 'doc-2', 'Secondary note about deployment.'), hybridScore: 0.8, rerankScore: 0.8 }),
+      scoreChunk({ chunk: makeChunk(2, 'doc-3', 'Tertiary deployment mention.'), hybridScore: 0.7, rerankScore: 0.7 }),
+      scoreChunk({ chunk: makeChunk(3, 'doc-4', 'Unrelated deployment aside.'), hybridScore: 0.6, rerankScore: 0.6 }),
+      // Marginal: far below the top score.
+      scoreChunk({ chunk: makeChunk(4, 'doc-5', 'Barely related deployment footnote.'), hybridScore: 0.08, rerankScore: 0.08 }),
+    ].map((sc) => ({ ...sc, chunk: { ...sc.chunk, text: sc.chunk.text } })) as ScoredChunk[];
+
+    const context = new ContextAssembler().assemble(selected, { maxDocuments: 4 });
+    const docs = new Set(context.usedChunks.map((c) => c.documentId));
+
+    expect(docs.size).toBeLessThanOrEqual(4);
+    expect(docs.has('doc-5')).toBe(false);
+    expect(context.usedChunks.length).toBeGreaterThan(0);
+  });
+
+  it('does not quote structural table scaffolding into prose answers', async () => {
+    const engine = makeEngine();
+    await engine.ingest({
+      ownerId: 'owner-a',
+      fileName: 'regions.csv',
+      mimeType: 'text/csv',
+      textContent: 'region,seats,latency_ms\nap-south-1,12,38\nus-east-1,30,72',
+    });
+    await engine.ingest({
+      ownerId: 'owner-a',
+      fileName: 'summary.md',
+      mimeType: 'text/markdown',
+      textContent: '# Deployment\n\nThe deployment region is ap-south-1 and backups run nightly.',
+    });
+
+    const result = await engine.query({ ownerId: 'owner-a', query: 'what is the deployment region' });
+    expect(result.answer!.status).toBe('SUPPORTED');
+    expect(result.answer!.answer).toContain('ap-south-1');
+    // The CSV row dump stays retrievable evidence but is not spliced into prose.
+    expect(result.answer!.answer).not.toMatch(/Columns:\s*region/);
+  });
+});
+
+/* ==========================================================================
+ * Persistence: re-indexing durable chunks after a process restart
+ * ======================================================================== */
+
+describe('JARVIS-X v1.2 — Persistence and hydration', () => {
+  it('re-indexes persisted chunks after a restart and answers with citations', async () => {
+    const repository = new InMemorySessionRepository();
+    const userId = AUTHENTICATED.userId;
+
+    // ---- Process 1: ingest and persist --------------------------------
+    const engine1 = makeEngine();
+    const ingest = await engine1.ingest({
+      ownerId: userId,
+      fileName: 'retention.md',
+      mimeType: 'text/markdown',
+      textContent: '# Retention\n\nAudit logs are retained for 45 days for every tenant.',
+    });
+    expect(ingest.ok).toBe(true);
+
+    const stored = await repository.recordIngestedDocument(userId, {
+      projectId: null,
+      fileName: 'retention.md',
+      mimeType: 'text/markdown',
+      formatKind: 'markdown',
+      sizeBytes: 80,
+      chunkCount: ingest.chunkCount,
+      injectionFlagged: false,
+      summary: 'persisted',
+      metadata: { documentId: ingest.documentId },
+      contentHash: ingest.contentHash,
+      pageCount: ingest.pageCount,
+      lifecycle: ingest.lifecycle,
+      parser: ingest.parser,
+      trustLevel: 'untrusted_external',
+    });
+
+    const chunks = engine1.index.allForOwner(userId).filter((c) => c.documentId === ingest.documentId);
+    await repository.recordDocumentChunks(
+      userId,
+      stored.id,
+      chunks.map((chunk) => ({
+        projectId: chunk.projectId,
+        chunkIndex: chunk.order,
+        chunkKey: chunk.chunkId,
+        section: chunk.section,
+        headingPath: chunk.headingPath,
+        page: chunk.page,
+        pageStart: chunk.pageRange?.[0] ?? null,
+        pageEnd: chunk.pageRange?.[1] ?? null,
+        textContent: chunk.text,
+        charCount: chunk.charCount,
+        tokenEstimate: chunk.tokenEstimate,
+        contentHash: chunk.contentHash,
+        trustLevel: chunk.trustLevel,
+      }))
+    );
+
+    // ---- Simulated restart: a fresh engine starts empty ----------------
+    const engine2 = makeEngine();
+    expect(engine2.hasIndexedDocuments(userId)).toBe(false);
+
+    const before = await engine2.query({ ownerId: userId, query: 'how long are audit logs retained' });
+    expect(before.answer!.insufficientEvidence).toBe(true);
+
+    // ---- Hydrate from durable storage ---------------------------------
+    const persisted = await repository.listIngestedDocuments!(userId, 50);
+    let hydrated = 0;
+    for (const record of persisted) {
+      const meta = record.metadata as { documentId?: string };
+      const rows = await repository.listDocumentChunks!(userId, record.id, 500);
+      if (!meta.documentId || rows.length === 0) continue;
+      const result = await engine2.hydrateDocument({
+        ownerId: userId,
+        documentId: meta.documentId,
+        filename: record.fileName,
+        mimeType: record.mimeType,
+        format: 'markdown',
+        title: record.fileName,
+        projectId: record.projectId,
+        pageCount: record.pageCount ?? 0,
+        contentHash: record.contentHash ?? '',
+        ingestedAt: record.createdAt,
+        lifecycle: record.lifecycle ?? 'READY',
+        parser: record.parser ?? 'persisted',
+        parserVersion: record.parserVersion ?? 'unknown',
+        pageProvenanceAvailable: record.pageProvenanceAvailable ?? false,
+        ocrRequired: record.ocrRequired ?? false,
+        chunks: rows.map((row) => ({
+          chunkKey: row.chunkKey,
+          chunkIndex: row.chunkIndex,
+          section: row.section,
+          headingPath: row.headingPath,
+          page: row.page,
+          pageStart: row.pageStart,
+          pageEnd: row.pageEnd,
+          textContent: row.textContent,
+          charCount: row.charCount,
+          tokenEstimate: row.tokenEstimate,
+          contentHash: row.contentHash,
+          trustLevel: row.trustLevel,
+        })),
+      });
+      if (result.hydrated) hydrated += 1;
+    }
+
+    expect(hydrated).toBe(1);
+    expect(engine2.hasIndexedDocuments(userId)).toBe(true);
+
+    const after = await engine2.query({ ownerId: userId, query: 'how long are audit logs retained' });
+    expect(after.answer!.status).toBe('SUPPORTED');
+    expect(after.answer!.answer).toContain('45 days');
+    expect(after.answer!.citations.length).toBeGreaterThan(0);
+    expect(after.answer!.citations[0].documentId).toBe(ingest.documentId);
+
+    // Hydration is idempotent — a second pass must not duplicate chunks.
+    const again = await engine2.hydrateDocument({
+      ownerId: userId,
+      documentId: ingest.documentId!,
+      filename: 'retention.md',
+      mimeType: 'text/markdown',
+      format: 'markdown',
+      title: 'retention.md',
+      projectId: null,
+      pageCount: 0,
+      contentHash: ingest.contentHash ?? '',
+      ingestedAt: new Date().toISOString(),
+      lifecycle: 'READY',
+      parser: 'persisted',
+      parserVersion: 'unknown',
+      pageProvenanceAvailable: false,
+      ocrRequired: false,
+      chunks: [],
+    });
+    expect(again.hydrated).toBe(false);
+    expect(engine2.retrievableChunkCount(userId)).toBe(chunks.length);
+  });
+
+  it('never hydrates another owner’s chunks into the requesting owner', async () => {
+    const engine = makeEngine();
+    const other = '22222222-2222-4222-8222-222222222222';
+
+    await engine.hydrateDocument({
+      ownerId: other,
+      documentId: 'doc-other',
+      filename: 'other.md',
+      mimeType: 'text/markdown',
+      format: 'markdown',
+      title: 'other',
+      projectId: null,
+      pageCount: 0,
+      contentHash: 'h-other',
+      ingestedAt: '2026-10-01T00:00:00.000Z',
+      lifecycle: 'READY',
+      parser: 'persisted',
+      parserVersion: 'unknown',
+      pageProvenanceAvailable: false,
+      ocrRequired: false,
+      chunks: [
+        {
+          chunkKey: 'doc-other-c-0',
+          chunkIndex: 0,
+          section: null,
+          headingPath: [],
+          page: null,
+          pageStart: null,
+          pageEnd: null,
+          textContent: 'The other tenant secret is ORION-9.',
+          charCount: 38,
+          tokenEstimate: 9,
+          contentHash: 'hc-other',
+          trustLevel: 'untrusted_external',
+        },
+      ],
+    });
+
+    expect(engine.retrievableChunkCount(other)).toBe(1);
+    expect(engine.retrievableChunkCount(AUTHENTICATED.userId)).toBe(0);
+
+    const leak = await engine.query({
+      ownerId: AUTHENTICATED.userId,
+      query: 'other tenant secret ORION',
+    });
+    expect(leak.retrieval!.candidateCount).toBe(0);
+    expect(leak.answer!.answer).not.toContain('ORION-9');
+  });
+});
+
+/* ==========================================================================
+ * Resource bounds
+ * ======================================================================== */
+
+describe('JARVIS-X v1.2 — Resource bounds', () => {
+  it('enforces maxChunks instead of indexing an unbounded number of chunks', async () => {
+    const engine = makeEngine();
+    // 6000 heading-delimited sections exceed the 4000-chunk security limit.
+    const huge = Array.from(
+      { length: 6000 },
+      (_, i) => `## Section ${i}\n\nBody paragraph ${i} describing ingestion validation behaviour.`
+    ).join('\n\n');
+
+    const result = await engine.ingest({
+      ownerId: 'owner-bounds',
+      fileName: 'huge.md',
+      mimeType: 'text/markdown',
+      textContent: huge,
+    });
+
+    expect(result.ok).toBe(true);
+    // Truncated, but never silently reported as a complete index.
+    expect(result.chunkCount).toBe(4000);
+    expect(result.lifecycle).toBe('PARTIAL');
+    expect(result.warnings.join(' ')).toMatch(/Chunk limit \(4000\) reached/i);
+    expect(result.warnings.join(' ')).toMatch(/not indexed/i);
+    expect(engine.retrievableChunkCount('owner-bounds')).toBeLessThanOrEqual(4000);
+  });
+
+  it('keeps query cost bounded on a large corpus', async () => {
+    const engine = makeEngine();
+    const corpus = Array.from(
+      { length: 500 },
+      (_, i) => `## Topic ${i}\n\nThe ingestion pipeline validates document number ${i} before parsing.`
+    ).join('\n\n');
+
+    await engine.ingest({
+      ownerId: 'owner-perf',
+      fileName: 'corpus.md',
+      mimeType: 'text/markdown',
+      textContent: corpus,
+    });
+
+    const result = await engine.query({
+      ownerId: 'owner-perf',
+      query: 'what does the ingestion pipeline validate',
+    });
+
+    expect(result.ok).toBe(true);
+    // The scan pool is every owned chunk (513), but only the top candidates are
+    // reranked and only a bounded context reaches the claim builder.
+    expect(result.retrieval!.candidateCount).toBeGreaterThan(40);
+    expect(result.retrieval!.scoredCount).toBeLessThanOrEqual(40);
+    expect(result.retrieval!.selectedCount).toBeLessThanOrEqual(8);
+    expect(result.answer!.citations.length).toBeLessThanOrEqual(12);
+    expect(new Set(result.answer!.citations.map((c) => c.documentId)).size).toBeLessThanOrEqual(4);
+  });
+});
+
+/* ==========================================================================
  * W: Deletion / revocation
  * ======================================================================== */
 
@@ -1712,6 +2092,7 @@ describe('JARVIS-X v1.2 — Reranking, summarization, query understanding', () =
       candidates: [scoreChunk({ chunk, hybridScore: 0.9, keywordScore: 0.8 })],
       selected: [scoreChunk({ chunk, hybridScore: 0.9, keywordScore: 0.8 })],
       rerankingMode: 'deterministic_fallback',
+      scoredCount: 1,
       embeddingStatus: {
         mode: 'deterministic_fallback',
         providerId: 'deterministic-feature-hash-1536',

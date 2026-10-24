@@ -4,6 +4,7 @@ import type { PermissionRequest } from '@/core/types';
 import { InMemorySessionRepository } from '@/server/repositories/in-memory-repository';
 import { ResilientDataRepository } from '@/server/repositories/resilient-repository';
 import { SupabaseDataRepository } from '@/server/repositories/supabase-repository';
+import { getDocumentEngine } from '@/server/document-engine';
 import {
   GUEST_ACTOR,
   resolveRequestActor,
@@ -76,7 +77,13 @@ export async function getJarvisCoreForRequest(request?: Request | null): Promise
     repository,
     getSupabaseDiagnostics,
     actor,
-    getSharedPendingPermissions()
+    getSharedPendingPermissions(),
+    {
+      // One document engine per server process. Ingested documents must remain
+      // retrievable on the next request; owner isolation is enforced inside the
+      // engine by `ownerId` on every read, and memory writes stay per-call.
+      documentEngine: getDocumentEngine(),
+    }
   );
 
   return { jarvis, actor, repository };

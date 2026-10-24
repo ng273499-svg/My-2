@@ -33,6 +33,11 @@ function fenceSafe(text: string): string {
 export interface AssemblyOptions {
   budgetTokens?: number;
   maxChunks?: number;
+  /**
+   * Maximum number of DISTINCT documents that may contribute evidence to a
+   * single answer. Prevents speculative stitching across unrelated documents.
+   */
+  maxDocuments?: number;
   titlesByDocumentId?: Map<string, string>;
 }
 
@@ -45,12 +50,26 @@ export class ContextAssembler {
     const maxChunks = options.maxChunks ?? 12;
     const titles = options.titlesByDocumentId ?? new Map<string, string>();
 
+    const maxDocuments = options.maxDocuments ?? 4;
+
     const usedChunks: DocumentChunk[] = [];
-    const seenHashes = new Set<string>();
-    const seenText = new Set<string>();
     let duplicatePassagesRemoved = 0;
     let tokenEstimate = 0;
     let truncated = false;
+
+    // Duplicate detection is applied PER DOCUMENT. The same passage appearing in
+    // two different documents is two independent sources and must be preserved,
+    // otherwise a contradiction between them could never be detected or cited.
+    const perDocumentSeen = new Map<string, { hashes: Set<string>; text: Set<string> }>();
+    const usedDocumentIds = new Set<string>();
+
+    // Relative relevance floor: once we have a few passages, stop pulling in
+    // marginal evidence that merely shares a keyword. Keeps answers focused and
+    // prevents speculative stitching across unrelated documents.
+    const scoreOf = (scored: ScoredChunk): number => scored.rerankScore ?? scored.hybridScore;
+    const topScore = selected.reduce((max, sc) => Math.max(max, scoreOf(sc)), 0);
+    const relevanceFloor = topScore * 0.4;
+    const MIN_CHUNKS_BEFORE_FLOOR = 3;
 
     for (const scored of selected) {
       if (usedChunks.length >= maxChunks) {
@@ -59,13 +78,34 @@ export class ContextAssembler {
       }
       const chunk = scored.chunk;
 
-      if (seenHashes.has(chunk.contentHash)) {
+      let seen = perDocumentSeen.get(chunk.documentId);
+      if (!seen) {
+        seen = { hashes: new Set<string>(), text: new Set<string>() };
+        perDocumentSeen.set(chunk.documentId, seen);
+      }
+
+      if (seen.hashes.has(chunk.contentHash)) {
         duplicatePassagesRemoved += 1;
         continue;
       }
       const normalized = chunk.text.trim().toLowerCase().slice(0, 400);
-      if (seenText.has(normalized)) {
+      if (seen.text.has(normalized)) {
         duplicatePassagesRemoved += 1;
+        continue;
+      }
+
+      // Bound document fan-out (a document already in use may add more chunks).
+      if (!usedDocumentIds.has(chunk.documentId) && usedDocumentIds.size >= maxDocuments) {
+        truncated = true;
+        continue;
+      }
+
+      // Drop marginal evidence once enough strong passages exist.
+      if (
+        usedChunks.length >= MIN_CHUNKS_BEFORE_FLOOR &&
+        topScore > 0 &&
+        scoreOf(scored) < relevanceFloor
+      ) {
         continue;
       }
 
@@ -77,8 +117,9 @@ export class ContextAssembler {
         break;
       }
 
-      seenHashes.add(chunk.contentHash);
-      seenText.add(normalized);
+      seen.hashes.add(chunk.contentHash);
+      seen.text.add(normalized);
+      usedDocumentIds.add(chunk.documentId);
       usedChunks.push(chunk);
       tokenEstimate += chunkTokens;
     }

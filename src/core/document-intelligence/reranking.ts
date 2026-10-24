@@ -31,28 +31,44 @@ function terms(text: string): string[] {
 }
 
 /**
- * Remove exact duplicates (same content hash) and near-duplicates (very high
- * token overlap) while keeping the higher-scoring representative.
+ * Remove redundant candidates.
+ *
+ * Deduplication is scoped PER DOCUMENT on purpose. Two near-identical passages
+ * from two DIFFERENT documents are distinct sources: they must both survive,
+ * because collapsing them would make cross-document contradiction detection
+ * impossible and would silently drop one side of a conflict — exactly the
+ * behaviour the v1.2 spec forbids.
  */
 export function deduplicateCandidates(candidates: ScoredChunk[]): {
   kept: ScoredChunk[];
   removed: number;
 } {
   const kept: ScoredChunk[] = [];
-  const seenHashes = new Set<string>();
-  const seenTermSets: Array<Set<string>> = [];
   let removed = 0;
 
+  // documentId → { hashes, termSets }
+  const perDocument = new Map<
+    string,
+    { hashes: Set<string>; termSets: Array<Set<string>> }
+  >();
+
   for (const candidate of candidates) {
+    const documentId = candidate.chunk.documentId;
+    let state = perDocument.get(documentId);
+    if (!state) {
+      state = { hashes: new Set<string>(), termSets: [] };
+      perDocument.set(documentId, state);
+    }
+
     const hash = candidate.chunk.contentHash;
-    if (seenHashes.has(hash)) {
+    if (state.hashes.has(hash)) {
       removed += 1;
       continue;
     }
 
     const candidateTerms = new Set(terms(candidate.chunk.text));
     let isNearDuplicate = false;
-    for (const existing of seenTermSets) {
+    for (const existing of state.termSets) {
       if (candidateTerms.size === 0 || existing.size === 0) continue;
       let overlap = 0;
       for (const t of candidateTerms) {
@@ -69,8 +85,8 @@ export function deduplicateCandidates(candidates: ScoredChunk[]): {
       continue;
     }
 
-    seenHashes.add(hash);
-    seenTermSets.push(candidateTerms);
+    state.hashes.add(hash);
+    state.termSets.push(candidateTerms);
     kept.push(candidate);
   }
 

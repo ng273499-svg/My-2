@@ -26,6 +26,19 @@ function terms(text: string): string[] {
     .filter((t) => t.length >= 3 && !STOP_WORDS.has(t));
 }
 
+/**
+ * Detect structural scaffolding produced by the tabular parser ("Columns: …",
+ * "Row 3: a=1; b=2"). It is valid evidence and stays retrievable, but it reads
+ * badly inside prose, so it is down-weighted rather than promoted to a claim.
+ */
+function looksLikeTableScaffolding(sentence: string): boolean {
+  if (/^(Columns:|Row \d+:)/.test(sentence)) return true;
+  const equals = (sentence.match(/=/g) ?? []).length;
+  const semicolons = (sentence.match(/;/g) ?? []).length;
+  const words = sentence.split(/\s+/).length;
+  return equals >= 3 && semicolons >= 2 && words > 0 && equals / words > 0.08;
+}
+
 function splitSentences(text: string): string[] {
   return text
     .split(/(?<=[.!?])\s+|\n+/)
@@ -75,12 +88,20 @@ export function selectEvidenceSentences(
       const distinctMatches = new Set(sentenceTerms.filter((t) => queryTerms.has(t))).size;
       const density = distinctMatches / Math.max(4, new Set(sentenceTerms).size);
 
-      const score = coverage * 0.7 + density * 0.3;
+      const base = coverage * 0.7 + density * 0.3;
+      const score = looksLikeTableScaffolding(sentence) ? base * 0.35 : base;
+      if (score <= 0) continue;
       candidates.push({ sentence, chunk, score });
     }
   }
 
   candidates.sort((a, b) => b.score - a.score);
+
+  // Relative relevance floor: a sentence that matches a single query word by
+  // accident must not be spliced into an otherwise focused answer. The single
+  // best sentence is always kept so an answer is never silently empty.
+  const bestScore = candidates.length > 0 ? candidates[0].score : 0;
+  const sentenceFloor = bestScore * 0.45;
 
   // Take the best sentences, at most 2 per chunk, then bound the total.
   const perChunk = new Map<string, number>();
@@ -90,6 +111,7 @@ export function selectEvidenceSentences(
   for (const candidate of candidates) {
     if (selected.length >= MAX_SENTENCES) break;
     if (candidate.score <= 0) break;
+    if (selected.length > 0 && candidate.score < sentenceFloor) break;
     if (seen.has(candidate.sentence)) continue;
 
     const count = perChunk.get(candidate.chunk.chunkId) ?? 0;

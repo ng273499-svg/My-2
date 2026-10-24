@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { getJarvisCoreForRequest } from '@/server/runtime';
+import { ensureDocumentsHydrated } from '@/server/document-engine';
 
 /**
  * JARVIS-X v1.2.0 — Grounded Document Query API
@@ -52,7 +53,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const { jarvis, actor } = await getJarvisCoreForRequest(request);
+    const { jarvis, actor, repository } = await getJarvisCoreForRequest(request);
 
     if (!actor.authenticated) {
       return NextResponse.json(
@@ -65,6 +66,15 @@ export async function POST(request: Request) {
         { status: 401 }
       );
     }
+
+    // Documents persisted in a previous server process are re-indexed from
+    // durable storage before retrieval, so a restart never silently hides the
+    // owner's own documents.
+    const hydration = await ensureDocumentsHydrated(
+      jarvis.documentEngine,
+      actor.userId,
+      repository
+    );
 
     const result = await jarvis.queryDocuments({
       query: parsed.data.query,
@@ -127,6 +137,7 @@ export async function POST(request: Request) {
           }
         : null,
       durationMs: result.durationMs,
+      hydration,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Document query failed';

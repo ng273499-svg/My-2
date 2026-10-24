@@ -182,6 +182,7 @@ export class HybridRetriever {
     embeddingStatus: EmbeddingStatus;
     diagnostics: string[];
     candidateCount: number;
+    scoredCount: number;
   }> {
     const understanding = understandQuery(query);
     const embeddingStatus = this.index.embeddingStatus();
@@ -192,7 +193,7 @@ export class HybridRetriever {
 
     if (pool.length === 0) {
       diagnostics.push('No authorized chunks matched the retrieval scope.');
-      return { scored: [], understanding, embeddingStatus, diagnostics, candidateCount };
+      return { scored: [], understanding, embeddingStatus, diagnostics, candidateCount, scoredCount: 0 };
     }
 
     const weights: RetrievalWeights = { ...DEFAULT_WEIGHTS, ...options.weights };
@@ -312,6 +313,7 @@ export class HybridRetriever {
     const candidateLimit = options.candidateLimit ?? 40;
     return {
       scored: scored.slice(0, candidateLimit),
+      scoredCount: Math.min(scored.length, candidateLimit),
       understanding,
       embeddingStatus,
       diagnostics,

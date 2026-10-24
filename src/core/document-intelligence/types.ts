@@ -232,7 +232,10 @@ export interface RetrievalResult {
   selected: ScoredChunk[];
   rerankingMode: 'deterministic_fallback' | 'provider';
   embeddingStatus: EmbeddingStatus;
+  /** Every owned chunk that entered scoring (diagnostic; not a cost bound). */
   candidateCount: number;
+  /** Chunks actually ranked and passed to reranking (bounded by candidateLimit). */
+  scoredCount: number;
   selectedCount: number;
   diagnostics: string[];
 }

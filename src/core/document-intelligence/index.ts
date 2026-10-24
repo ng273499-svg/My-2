@@ -41,7 +41,7 @@ import type {
 } from './types';
 import { DocumentSecurityGate, formatFromExtension } from './security-gate';
 import { ParserRegistry } from './parsers';
-import { chunkDocument, deriveSections, hashContent } from './chunking';
+import { chunkDocument, deriveSections, estimateTokens, hashContent } from './chunking';
 import { DocumentEmbeddingService } from './embeddings';
 import { DocumentIndex, HybridRetriever } from './retrieval';
 import { RerankingService } from './reranking';
@@ -438,10 +438,40 @@ export class DocumentIntelligenceEngine {
     const derived = deriveSections(extraction.blocks);
     document.sections = derived.sections;
 
-    const { chunks, duplicatesRemoved } = chunkDocument(document);
+    const chunked = chunkDocument(document);
+    const duplicatesRemoved = chunked.duplicatesRemoved;
+    let chunks = chunked.chunks;
+    let bounded = false;
 
     if (duplicatesRemoved > 0) {
       warnings.push(`${duplicatesRemoved} duplicate passage(s) were collapsed during chunking.`);
+    }
+
+    // Resource bound: a heading-dense document can expand into far more chunks
+    // than the security limits allow. Truncating (and saying so) keeps one
+    // document from exhausting the process heap, without pretending the whole
+    // document was indexed.
+    const maxChunks = this.securityGate.getLimits().maxChunks;
+    if (chunks.length > maxChunks) {
+      const attempted = chunks.length;
+      chunks = chunks.slice(0, maxChunks);
+      warnings.push(
+        `Chunk limit (${maxChunks}) reached: only the first ${maxChunks} of ${attempted} chunks were indexed. The remaining ${attempted - maxChunks} chunk(s) were not indexed and will not be retrieved or quoted.`
+      );
+      bounded = true;
+      this.record({
+        documentId,
+        phase: 'chunking',
+        parser: extraction.parser,
+        chunkCount: chunks.length,
+        candidateCount: 0,
+        selectedCount: 0,
+        rerankingMode: null,
+        citationCount: 0,
+        durationMs: 0,
+        verificationStatus: `chunk_limit_truncated:${maxChunks}/${attempted}`,
+        errors: [],
+      });
     }
 
     if (chunks.length === 0) {
@@ -547,7 +577,7 @@ export class DocumentIntelligenceEngine {
 
     const lifecycle: NormalizedDocument['lifecycle'] = extraction.ocrRequired
       ? 'OCR_REQUIRED'
-      : extractionPartial
+      : extractionPartial || bounded
         ? 'PARTIAL'
         : 'READY';
 
@@ -764,6 +794,7 @@ export class DocumentIntelligenceEngine {
       candidates: retrieved.scored,
       selected: selected.slice(0, topK),
       rerankingMode: this.reranking.mode,
+      scoredCount: retrieved.scoredCount,
       embeddingStatus: retrieved.embeddingStatus,
       candidateCount: retrieved.candidateCount,
       selectedCount: Math.min(topK, selected.length),
@@ -904,6 +935,143 @@ export class DocumentIntelligenceEngine {
     return result;
   }
 
+  /**
+   * Re-index a document that was previously persisted, WITHOUT re-parsing it.
+   *
+   * The in-process retrieval index is rebuilt from durable storage on demand, so
+   * a server restart does not silently make previously ingested documents
+   * un-retrievable. Chunk text and provenance come from the store of record;
+   * nothing is re-extracted or invented.
+   */
+  async hydrateDocument(input: {
+    ownerId: string;
+    documentId: string;
+    filename: string;
+    mimeType: string;
+    format: SupportedDocumentFormat;
+    title: string;
+    projectId: string | null;
+    pageCount: number;
+    contentHash: string;
+    ingestedAt: string;
+    lifecycle: string;
+    parser: string;
+    parserVersion: string;
+    pageProvenanceAvailable: boolean;
+    ocrRequired: boolean;
+    chunks: Array<{
+      chunkKey: string;
+      chunkIndex: number;
+      section: string | null;
+      headingPath: string[];
+      page: number | null;
+      pageStart: number | null;
+      pageEnd: number | null;
+      textContent: string;
+      charCount: number;
+      tokenEstimate: number;
+      contentHash: string;
+      trustLevel: string;
+    }>;
+  }): Promise<{ hydrated: boolean; chunkCount: number }> {
+    if (!input.ownerId || !input.documentId) {
+      return { hydrated: false, chunkCount: 0 };
+    }
+    // Already indexed in this process — never duplicate.
+    if (this.index.hasDocument(input.ownerId, input.documentId)) {
+      return { hydrated: false, chunkCount: this.index.countChunks(input.ownerId, input.documentId) };
+    }
+    if (this.store.get(input.ownerId, input.documentId)) {
+      return { hydrated: false, chunkCount: 0 };
+    }
+
+    const lifecycle = (
+      ['INGESTING', 'READY', 'PARTIAL', 'OCR_REQUIRED', 'FAILED', 'REMOVED'].includes(input.lifecycle)
+        ? input.lifecycle
+        : 'PARTIAL'
+    ) as NormalizedDocument['lifecycle'];
+
+    const chunks: DocumentChunk[] = input.chunks
+      .slice()
+      .sort((a, b) => a.chunkIndex - b.chunkIndex)
+      .map((chunk, index) => {
+        const pageRange: [number, number] | null =
+          typeof chunk.pageStart === 'number' && typeof chunk.pageEnd === 'number'
+            ? [chunk.pageStart, chunk.pageEnd]
+            : typeof chunk.page === 'number'
+              ? [chunk.page, chunk.page]
+              : null;
+        return {
+          chunkId: chunk.chunkKey || `${input.documentId}-c-${index}`,
+          documentId: input.documentId,
+          ownerId: input.ownerId,
+          projectId: input.projectId,
+          section: chunk.section,
+          headingPath: chunk.headingPath ?? [],
+          page: chunk.page ?? pageRange?.[0] ?? null,
+          pageRange,
+          text: chunk.textContent,
+          charCount: chunk.charCount || chunk.textContent.length,
+          tokenEstimate: chunk.tokenEstimate || estimateTokens(chunk.textContent),
+          contentHash: chunk.contentHash,
+          trustLevel: (
+            chunk.trustLevel === 'system_verified' || chunk.trustLevel === 'user_authorized'
+              ? chunk.trustLevel
+              : 'untrusted_external'
+          ) as DocumentChunk['trustLevel'],
+          order: index,
+          ingestedAt: input.ingestedAt,
+        };
+      })
+      .filter((chunk) => chunk.text.trim().length > 0);
+
+    if (chunks.length === 0) {
+      return { hydrated: false, chunkCount: 0 };
+    }
+
+    const document: NormalizedDocument = {
+      documentId: input.documentId,
+      ownerId: input.ownerId,
+      projectId: input.projectId,
+      filename: input.filename,
+      mimeType: input.mimeType,
+      format: input.format,
+      title: input.title || input.filename,
+      source: 'upload',
+      pageCount: input.pageCount,
+      sections: [],
+      blocks: [],
+      tables: [],
+      metadata: { hydratedFromPersistence: true },
+      parser: input.parser || 'persisted',
+      parserVersion: input.parserVersion || 'unknown',
+      ingestedAt: input.ingestedAt,
+      contentHash: input.contentHash,
+      trustLevel: 'untrusted_external',
+      provenance: {
+        source: 'upload',
+        originalFileName: input.filename,
+        pageCount: input.pageCount,
+        pageProvenanceAvailable: input.pageProvenanceAvailable,
+        extractedAt: input.ingestedAt,
+      },
+      lifecycle,
+      warnings: [],
+      ocrRequired: input.ocrRequired,
+      injectionFlagged: false,
+    };
+
+    await this.index.addChunks(chunks);
+    this.store.put(document, chunks);
+
+    return { hydrated: true, chunkCount: chunks.length };
+  }
+
+  /** True when this owner has any retrievable chunks in the current process. */
+  hasIndexedDocuments(ownerId: string): boolean {
+    return this.index.countChunks(ownerId) > 0;
+  }
+
   /** Chunks currently retrievable for an owner (test/diagnostic helper). */
   retrievableChunkCount(ownerId: string, documentId?: string): number {
     return this.index.countChunks(ownerId, documentId);
@@ -926,7 +1094,7 @@ export { ParserRegistry } from './parsers';
 export { chunkDocument, DEFAULT_CHUNKING_OPTIONS, estimateTokens } from './chunking';
 export { DocumentEmbeddingService } from './embeddings';
 export { DocumentIndex, HybridRetriever } from './retrieval';
-export { RerankingService, DeterministicReranker } from './reranking';
+export { RerankingService, DeterministicReranker, deduplicateCandidates } from './reranking';
 export { ContextAssembler, DEFAULT_CONTEXT_BUDGET_TOKENS } from './context-assembly';
 export { GroundedAnswerer } from './grounding';
 export { SummarizationEngine } from './summarization';
