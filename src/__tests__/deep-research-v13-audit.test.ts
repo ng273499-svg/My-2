@@ -81,6 +81,22 @@ const HOSTILE_BODY = fixturePage({
   `,
 });
 
+/**
+ * A CURRENT, non-version-scoped disagreement. This is the case that must be
+ * reported as a conflict — unlike the 2019 page, which is explicitly scoped to
+ * version 1.x and is therefore context, not a contradiction.
+ */
+const CONFLICT_BODY = fixturePage({
+  title: 'Quantum Cache deployment notes',
+  publishedAt: '2026-09-20T00:00:00.000Z',
+  author: 'Operations Team',
+  body: `
+    <h1>Deployment notes</h1>
+    <p>The default time-to-live for a cached entry is not 300 seconds.</p>
+    <p>In our measurements the default time-to-live for a cached entry is 60 seconds.</p>
+  `,
+});
+
 const UNDATED_BODY = fixturePage({
   title: 'Cache notes without a date',
   publishedAt: null,
@@ -138,6 +154,7 @@ class AuditSearchProvider implements SearchProvider {
         page(this.hosts.mirror, '/mirror', 'Quantum Cache official reference (mirror)', 'Mirrored copy of the official reference.', '2026-09-02'),
         page(this.hosts.reviewer, '/stale', 'Quantum Cache tips (2019)', 'Older guide covering default TTL.', '2019-03-11'),
         page(this.hosts.reviewer, '/hostile', 'Quantum Cache tips and tricks', 'Community tips about default TTL.', '2026-07-20'),
+        page(this.hosts.publisher, '/conflict', 'Quantum Cache deployment notes', 'Operational notes on default TTL.', '2026-09-20'),
         page(this.hosts.reviewer, '/undated', 'Cache notes', 'Notes about default TTL behaviour.', null),
         page(this.hosts.publisher, '/paywall', 'Quantum Cache market report', 'Market report on Quantum Cache.', '2026-05-05'),
         page(this.hosts.publisher, '/blocked', 'Blocked analysis', 'Analysis of Quantum Cache risk.', '2026-04-01'),
@@ -195,6 +212,7 @@ describe('v1.3 AUDIT — independent end-to-end run (local HTTP, NON-LIVE)', () 
         '/mirror': PRIMARY_BODY,
         '/stale': STALE_BODY,
         '/hostile': HOSTILE_BODY,
+        '/conflict': CONFLICT_BODY,
         '/undated': UNDATED_BODY,
       };
 
@@ -427,6 +445,47 @@ describe('v1.3 AUDIT — independent end-to-end run (local HTTP, NON-LIVE)', () 
     expect(result.status).toBe('CANCELLED');
     expect(result.report).toBeNull();
     expect(result.metrics.cancelled).toBe(true);
+  });
+
+  it('ranks a fresh source above a stale one for a current-information question', async () => {
+    const engine = auditEngine();
+    const result = await engine.run({ ownerId: OWNER, query: QUESTION, mode: 'LATEST', freshness: 'latest' });
+
+    const fresh = result.sources.find((source) => source.url.endsWith('/docs') && !source.duplicateOf);
+    const stale = result.sources.find((source) => source.url.endsWith('/stale'));
+    expect(fresh).toBeDefined();
+    expect(stale).toBeDefined();
+
+    // Both were read, but the 2019 page must score strictly worse on freshness.
+    expect(fresh!.quality).not.toBeNull();
+    expect(stale!.quality).not.toBeNull();
+    expect(fresh!.quality!.freshness).toBeGreaterThan(stale!.quality!.freshness);
+    expect(fresh!.quality!.overall).toBeGreaterThan(stale!.quality!.overall);
+  });
+
+  it('reports a genuine current contradiction without discarding either side', async () => {
+    const engine = auditEngine();
+    const result = await engine.run({ ownerId: OWNER, query: QUESTION, mode: 'DEEP_RESEARCH' });
+
+    // The /conflict page asserts 60s for the CURRENT release, so this is a real
+    // disagreement rather than a historical note.
+    expect(result.report!.contradictions.length).toBeGreaterThan(0);
+
+    const contradiction = result.report!.contradictions[0];
+    expect(contradiction.sideA.statement.length).toBeGreaterThan(0);
+    expect(contradiction.sideB.statement.length).toBeGreaterThan(0);
+    expect(contradiction.sideA.statement).not.toBe(contradiction.sideB.statement);
+
+    // Both sides survive into the report — neither is silently dropped.
+    const bothSidesVoiceTheClaim = [contradiction.sideA, contradiction.sideB].some(
+      (side) => side.statement.toLowerCase().includes('300') || side.statement.toLowerCase().includes('60')
+    );
+    expect(bothSidesVoiceTheClaim).toBe(true);
+
+    // An unexplained conflict must NOT be marked resolved.
+    if (contradiction.possibleExplanation === null) {
+      expect(contradiction.resolved).toBe(false);
+    }
   });
 
   it('honours owner isolation on every task surface', async () => {
