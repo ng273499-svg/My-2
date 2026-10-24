@@ -9,6 +9,7 @@ import {
   detectDocumentFormat,
 } from '@/core/files';
 import type { VisionEngine } from '@/core/modules/vision-engine';
+import type { CodingEngine } from '@/core/coding-engine';
 import { sanitizeUntrustedExternalOutput } from './errors';
 
 export type CapabilityHandler = (
@@ -22,6 +23,11 @@ export interface RegisteredRuntimeCapability {
 
 export interface CapabilityRegistryOptions {
   visionEngine?: VisionEngine;
+  /**
+   * JARVIS-X v1.1.0 Coding Engine. When present the `coding` capability runs a
+   * real, bounded repository analysis instead of a static blueprint.
+   */
+  codingEngine?: CodingEngine;
   onIngestKnowledgeChunk?: (
     userId: string,
     chunk: string,
@@ -41,12 +47,17 @@ export class CapabilityRegistry {
   >();
 
   constructor(options?: CapabilityRegistryOptions) {
-    this.registerDefaults(options?.visionEngine, options?.onIngestKnowledgeChunk);
+    this.registerDefaults(
+      options?.visionEngine,
+      options?.onIngestKnowledgeChunk,
+      options?.codingEngine
+    );
   }
 
   private registerDefaults(
     visionEngine?: VisionEngine,
-    onIngestKnowledgeChunk?: CapabilityRegistryOptions['onIngestKnowledgeChunk']
+    onIngestKnowledgeChunk?: CapabilityRegistryOptions['onIngestKnowledgeChunk'],
+    codingEngine?: CodingEngine
   ): void {
     // 1. Direct Conversation (AVAILABLE)
     this.register({
@@ -109,19 +120,21 @@ export class CapabilityRegistry {
       }),
     });
 
-    // 4. Coding (PARTIAL_LOCAL — architectural blueprint ready; code sandbox NOT_AVAILABLE)
+    // 4. Coding (v1.1.0 Coding & Software Engineering Engine)
     this.register({
       definition: {
         id: 'coding',
-        name: 'Code Architecture & Sandboxed Execution',
-        description:
-          'Provides local engineering decomposition; isolated code execution sandbox is not yet connected.',
-        availability: 'PARTIAL_LOCAL',
+        name: 'Coding & Software Engineering Engine',
+        description: codingEngine
+          ? 'Bounded repository intelligence, structure analysis, defensive security review and project memory across 24+ languages (zero-cost local analysis).'
+          : 'Provides local engineering decomposition; isolated code execution sandbox is not yet connected.',
+        availability: codingEngine ? 'AVAILABLE' : 'PARTIAL_LOCAL',
         defaultRiskLevel: 'LOW_RISK',
         countsAsToolCall: true,
         supportsModalities: ['text'],
-        missingDependencyNote:
-          'Sandboxed code execution runtime & external Coding LLM are NOT_AVAILABLE.',
+        missingDependencyNote: codingEngine
+          ? 'Remote sandboxed execution and external coding LLMs remain NOT_AVAILABLE; all analysis is local and evidence-based.'
+          : 'Sandboxed code execution runtime & external Coding LLM are NOT_AVAILABLE.',
       },
       execute: async (ctx) => {
         const wantsLiveRun = /\b(run|execute|compile and run|execute python|run script)\b/i.test(
@@ -132,11 +145,16 @@ export class CapabilityRegistry {
             capabilityId: 'coding',
             status: 'NOT_AVAILABLE',
             summary:
-              'Sandboxed code execution is NOT_AVAILABLE. Refusing to fake script execution.',
+              'Arbitrary script execution is NOT_AVAILABLE. JARVIS-X refuses to fake script execution.',
             honestLimitationNote:
-              'Ephemeral code execution sandbox is NOT_AVAILABLE in this phase.',
+              'Arbitrary code execution is NOT_AVAILABLE; only allow-listed project commands run through the Coding Engine validator.',
           };
         }
+
+        if (codingEngine) {
+          return codingEngine.executeAsCapability(ctx);
+        }
+
         return {
           capabilityId: 'coding',
           status: 'PARTIAL_LOCAL',

@@ -1,3 +1,5 @@
+import { CodingEngine, createCodingEngine } from '@/core/coding-engine';
+import type { CodingTaskInput, CodingTaskResult } from '@/core/coding-engine';
 import { AIModelRouter } from '@/core/modules/ai-model-router';
 import { ContextEmotionEngine } from '@/core/modules/context-emotion-engine';
 import { ConversationEngine } from '@/core/modules/conversation-engine';
@@ -71,6 +73,7 @@ export class JarvisCore {
   public readonly proactiveMonitoringEngine: ProactiveMonitoringEngine;
 
   // Production Core Runtime components
+  public readonly codingEngine: CodingEngine;
   public readonly capabilityRegistry: CapabilityRegistry;
   public readonly specialistRegistry: SpecialistRegistry;
   public readonly runtimeMemoryBridge: RuntimeMemoryBridge;
@@ -109,9 +112,13 @@ export class JarvisCore {
     );
     this.proactiveMonitoringEngine = new ProactiveMonitoringEngine();
 
+    // Wire JARVIS-X v1.1.0 Coding & Software Engineering Engine
+    this.codingEngine = createCodingEngine(process.cwd(), { maxRepairIterations: 3 });
+
     // Wire Core Runtime Orchestrator
     this.capabilityRegistry = new CapabilityRegistry({
       visionEngine: this.visionEngine,
+      codingEngine: this.codingEngine,
       onIngestKnowledgeChunk: async (userId, chunk, meta) => {
         await this.memoryManager.ingestKnowledgeChunk(userId, chunk, {
           sourceLabel: meta.sourceLabel,
@@ -221,7 +228,7 @@ export class JarvisCore {
         name: 'Capability & Tool Registry',
         layer: 'execution',
         state: 'online',
-        summary: '10 runtime capabilities + 15 connector descriptors (honest NOT_AVAILABLE reporting).',
+        summary: '10 runtime capabilities + 15 connector descriptors · v1.1.0 Coding & Software Engineering Engine active (honest NOT_AVAILABLE reporting).',
       },
       {
         id: 'specialist-agent-manager',
@@ -356,7 +363,7 @@ export class JarvisCore {
     }));
 
     return {
-      version: '1.0.0-multimodal',
+      version: '1.1.0-coding-engine',
       coreState:
         supabaseDiag.serverReachability === 'degraded_unreachable' ? 'degraded' : 'online',
       serverTimestamp: new Date().toISOString(),
@@ -644,6 +651,103 @@ export class JarvisCore {
       savedMemoryId,
       memoryStatus,
     };
+  }
+
+  /**
+   * =========================================================================
+   * JARVIS-X v1.1.0 — Secure server-side Coding Task interface
+   * =========================================================================
+   * Owner-only. Voice alone is never accepted as identity proof. The client
+   * never supplies a filesystem path: the workspace is always the server root.
+   */
+  async runCodingTask(input: {
+    goal: string;
+    mode: CodingTaskInput['mode'];
+    conversationId?: string;
+    projectId?: string | null;
+    verificationPreference?: CodingTaskInput['verificationPreference'];
+    maxRepairIterations?: number;
+    /** Explicit operator acknowledgement for mutating coding modes. */
+    acknowledgeMutations?: boolean;
+    signal?: AbortSignal;
+  }): Promise<
+    | { ok: true; result: CodingTaskResult }
+    | { ok: false; errorCode: string; error: string }
+  > {
+    // --- Owner-only gate -------------------------------------------------
+    if (!this.actor.authenticated) {
+      return {
+        ok: false,
+        errorCode: 'UNAUTHORIZED_ACCESS',
+        error:
+          'Coding tasks require an authenticated owner session. Guest/voice-only sessions are never granted privileged engineering access.',
+      };
+    }
+
+    const goal = input.goal.trim();
+    if (!goal) {
+      return { ok: false, errorCode: 'INVALID_INPUT', error: 'Coding goal cannot be empty.' };
+    }
+
+    const readOnly = input.mode === 'analyze' || input.mode === 'review';
+
+    // --- Mutation gate: mutating modes need explicit acknowledgement -----
+    if (!readOnly && !input.acknowledgeMutations) {
+      return {
+        ok: false,
+        errorCode: 'CONFIRMATION_REQUIRED',
+        error:
+          'Mutating coding modes (feature / debug / refactor / implement-api) require explicit operator acknowledgement before execution.',
+      };
+    }
+
+    // --- Audit the request through the permission manager ----------------
+    const conversationId = normalizeConversationId(input.conversationId);
+    const tier = readOnly ? 'SAFE_READ' : 'CONFIRMATION_REQUIRED';
+    await this.permissionSecurityManager.evaluate({
+      userId: this.activeUserId,
+      conversationId,
+      actionCode: `CODING_TASK_${input.mode.toUpperCase()}`,
+      actionTitle: readOnly ? 'Coding Repository Analysis' : 'Coding Workspace Mutation',
+      targetResource: 'Server Workspace (authorized root only)',
+      tier,
+      summary: goal.slice(0, 180),
+      pendingPayload: { mode: input.mode, readOnly },
+    });
+
+    const result = await this.codingEngine.executeCodingTask({
+      goal,
+      conversationId,
+      projectId: input.projectId ?? null,
+      mode: input.mode,
+      // Never trust a client-supplied path.
+      authorizedWorkspace: this.codingEngine.workspaceRoot,
+      verificationPreference: input.verificationPreference ?? 'standard',
+      maxRepairIterations: input.maxRepairIterations,
+      signal: input.signal,
+    });
+
+    // Persist reusable project knowledge into hierarchical memory (no secrets).
+    try {
+      await this.memoryManager.storeMemory(
+        this.activeUserId,
+        `Coding task (${result.mode}) → ${result.status}. Changed ${result.changedFiles.length} file(s); repair attempts: ${result.repairAttempts}.`,
+        'project_context',
+        ['coding-engine', 'v1.1.0'],
+        undefined,
+        undefined,
+        {
+          memoryScope: 'project',
+          projectId: input.projectId ?? null,
+          importance: 3,
+          provenance: 'system_seed',
+        }
+      );
+    } catch {
+      // Project memory is best-effort and must never mask the coding result.
+    }
+
+    return { ok: true, result };
   }
 
   async getConversationMessages(conversationId = DEFAULT_CONVERSATION_ID): Promise<ChatMessage[]> {

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, Cpu, MessageSquare } from 'lucide-react';
+import { Activity, Code2, Cpu, MessageSquare } from 'lucide-react';
 import { DEFAULT_CONVERSATION_ID } from '@/core/utils/uuid';
 import type {
   AgentActivityStep,
@@ -46,6 +46,7 @@ import {
   type StagedVisionAttachment,
 } from './MultimodalInputBar';
 import { AgentActivityPanel } from './AgentActivityPanel';
+import { EngineeringWorkspacePanel } from './EngineeringWorkspacePanel';
 import { SystemTelemetryPanel } from './SystemTelemetryPanel';
 import { VisionInspectorModal } from './VisionInspectorModal';
 import { SettingsDrawer } from './SettingsDrawer';
@@ -81,7 +82,7 @@ export function JarvisDashboard({
   const [authModalOpen, setAuthModalOpen] = useState(false);
 
   // Mobile responsive view tab
-  const [mobileView, setMobileView] = useState<'console' | 'activity' | 'systems'>('console');
+  const [mobileView, setMobileView] = useState<'console' | 'activity' | 'systems' | 'engineering'>('console');
 
   // Real-Time Browser Voice & Female Persona Controller State (never auto-started)
   const voiceControllerRef = useRef<BrowserVoiceSessionController | null>(null);
@@ -913,7 +914,7 @@ export function JarvisDashboard({
               {/* Mobile Segmented Navigation (44px+ accessible touch targets) */}
               <nav
                 aria-label="Mobile Workspace Sections"
-                className="grid grid-cols-3 gap-1.5 rounded-2xl border border-cyan-400/15 bg-slate-950/80 p-1.5"
+                className="grid grid-cols-2 gap-1.5 rounded-2xl border border-cyan-400/15 bg-slate-950/80 p-1.5 sm:grid-cols-4"
               >
                 <button
                   type="button"
@@ -950,6 +951,18 @@ export function JarvisDashboard({
                 >
                   <Cpu className="h-4 w-4" />
                   <span>Core &amp; Mem</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMobileView('engineering')}
+                  className={`flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl font-display text-xs font-semibold transition ${
+                    mobileView === 'engineering'
+                      ? 'border border-cyan-400/40 bg-cyan-500/15 text-cyan-100'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Code2 className="h-4 w-4" />
+                  <span>Engineering</span>
                 </button>
               </nav>
 
@@ -1036,6 +1049,12 @@ export function JarvisDashboard({
                   runtimeResult={latestRuntimeResult}
                   isProcessing={isSending}
                   specialists={snapshot?.specialists ?? []}
+                />
+              )}
+
+              {mobileView === 'engineering' && (
+                <EngineeringWorkspacePanel
+                  authenticated={Boolean(snapshot?.auth.authenticated)}
                 />
               )}
 
