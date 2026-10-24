@@ -437,7 +437,7 @@ export function JarvisChat({
 
           <div className="border-t border-cyan-400/10 px-4 py-3">
             <a
-              href="/"
+              href="/dashboard"
               className="text-[11px] text-slate-500 underline-offset-2 transition hover:text-cyan-300 hover:underline"
             >
               Open full HUD dashboard →
