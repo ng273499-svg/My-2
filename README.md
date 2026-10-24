@@ -2,6 +2,16 @@
 
 JARVIS-X is a modular, security-first personal multimodal AI architecture combining a bounded state-machine runtime, provider-agnostic multi-model intelligence, 7-scope hierarchical memory, female vocal persona synthesis with full-duplex barge-in, binary vision frame inspection, structured document intelligence, and Supabase PostgreSQL 17 `FORCE ROW LEVEL SECURITY` persistence.
 
+## Run It — Website
+
+The site opens straight into a chat surface at `/` (the full command HUD stays at `/dashboard`).
+No API key, no login, and no credit card are required — it runs on the zero-cost local
+`Foundation Deterministic Core`.
+
+- **Deploy for a permanent public URL (2 min):** [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fng273499-svg%2FMy-2)
+- **Run locally:** `npm install && npm run build && npm start` → http://localhost:3000
+- **Full instructions:** see [DEPLOY.md](./DEPLOY.md)
+
 ## Core Capabilities (`v1.0.0-multimodal`)
 
 - **Core Runtime Orchestrator (`src/core/runtime/`)**: Bounded 12-state agent state machine (`RECEIVED` → `COMPLETED | AWAITING_APPROVAL | FAILED | CANCELLED`), 10 capability contracts, 10 specialist contracts (including `OPERATIONAL_LOCAL` `PlanningAgent`, `MemoryAgent`, `VerificationAgent`, `DataAgent`, `CybersecurityAgent`, `CodingAgent`), 4-tier risk & permission gating, and outcome verification (`VerificationLayer`).
