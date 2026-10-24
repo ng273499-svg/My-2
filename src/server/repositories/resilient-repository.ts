@@ -14,6 +14,9 @@ import type {
   ConnectedToolRecord,
   DataRepository,
   DocumentChunkRecord,
+  ResearchClaimRecord,
+  ResearchSessionRecord,
+  ResearchSourceRecord,
   IngestedDocumentRecord,
   ListMemoriesFilter,
   MemoryUpdatePatch,
@@ -374,5 +377,76 @@ export class ResilientDataRepository implements DataRepository {
       }
       return r.deleteProactiveWorkflow(userId, workflowId);
     });
+  }
+
+  /* ======================================================================
+   * v1.3 Research (delegated; falls back safely when a method is absent)
+   * ==================================================================== */
+
+  recordResearchSession(
+    userId: string,
+    session: Omit<ResearchSessionRecord, 'id' | 'createdAt' | 'updatedAt'>
+  ): Promise<ResearchSessionRecord> {
+    return this.run((r) =>
+      r.recordResearchSession
+        ? r.recordResearchSession(userId, session)
+        : this.fallback.recordResearchSession(userId, session)
+    );
+  }
+
+  listResearchSessions(userId: string, limit?: number): Promise<ResearchSessionRecord[]> {
+    return this.run((r) =>
+      r.listResearchSessions
+        ? r.listResearchSessions(userId, limit)
+        : this.fallback.listResearchSessions(userId, limit)
+    );
+  }
+
+  getResearchSession(userId: string, taskId: string): Promise<ResearchSessionRecord | null> {
+    return this.run((r) =>
+      r.getResearchSession
+        ? r.getResearchSession(userId, taskId)
+        : this.fallback.getResearchSession(userId, taskId)
+    );
+  }
+
+  recordResearchSources(
+    userId: string,
+    sessionId: string,
+    sources: Array<Omit<ResearchSourceRecord, 'id' | 'sessionId' | 'createdAt'>>
+  ): Promise<number> {
+    return this.run((r) =>
+      r.recordResearchSources
+        ? r.recordResearchSources(userId, sessionId, sources)
+        : this.fallback.recordResearchSources(userId, sessionId, sources)
+    );
+  }
+
+  listResearchSources(userId: string, sessionId: string, limit?: number): Promise<ResearchSourceRecord[]> {
+    return this.run((r) =>
+      r.listResearchSources
+        ? r.listResearchSources(userId, sessionId, limit)
+        : this.fallback.listResearchSources(userId, sessionId, limit)
+    );
+  }
+
+  recordResearchClaims(
+    userId: string,
+    sessionId: string,
+    claims: Array<Omit<ResearchClaimRecord, 'id' | 'sessionId' | 'createdAt'>>
+  ): Promise<number> {
+    return this.run((r) =>
+      r.recordResearchClaims
+        ? r.recordResearchClaims(userId, sessionId, claims)
+        : this.fallback.recordResearchClaims(userId, sessionId, claims)
+    );
+  }
+
+  listResearchClaims(userId: string, sessionId: string): Promise<ResearchClaimRecord[]> {
+    return this.run((r) =>
+      r.listResearchClaims
+        ? r.listResearchClaims(userId, sessionId)
+        : this.fallback.listResearchClaims(userId, sessionId)
+    );
   }
 }

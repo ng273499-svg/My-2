@@ -5,7 +5,8 @@ export type MemoryCategory =
   | 'episodic_summary'
   | 'workflow'
   | 'knowledge_chunk'
-  | 'event_record';
+  | 'event_record'
+  | 'research_summary';
 
 export type HierarchicalMemoryScope =
   | 'working'

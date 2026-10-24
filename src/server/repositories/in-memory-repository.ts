@@ -17,6 +17,9 @@ import type {
   ConnectedToolRecord,
   DataRepository,
   DocumentChunkRecord,
+  ResearchClaimRecord,
+  ResearchSessionRecord,
+  ResearchSourceRecord,
   IngestedDocumentRecord,
   ListMemoriesFilter,
   MemoryUpdatePatch,
@@ -54,6 +57,9 @@ interface UserPartition {
   auditLogs: AuditLogEntry[];
   ingestedDocuments: IngestedDocumentRecord[];
   documentChunks: DocumentChunkRecord[];
+  researchSessions: ResearchSessionRecord[];
+  researchSources: ResearchSourceRecord[];
+  researchClaims: ResearchClaimRecord[];
   proactiveWorkflows: ProactiveWorkflowRecord[];
 }
 
@@ -161,6 +167,9 @@ export class InMemorySessionRepository implements DataRepository {
         permissionRecords: [],
         ingestedDocuments: [],
         documentChunks: [],
+        researchSessions: [],
+        researchSources: [],
+        researchClaims: [],
         proactiveWorkflows: [],
         auditLogs: [
           {
@@ -774,5 +783,94 @@ export class InMemorySessionRepository implements DataRepository {
     if (idx === -1) return false;
     part.proactiveWorkflows.splice(idx, 1);
     return true;
+  }
+
+  /* ======================================================================
+   * v1.3 Research persistence (owner-partitioned)
+   * ==================================================================== */
+
+  async recordResearchSession(
+    userId: string,
+    session: Omit<ResearchSessionRecord, 'id' | 'createdAt' | 'updatedAt'>
+  ): Promise<ResearchSessionRecord> {
+    const part = this.getPartition(userId);
+    const now = new Date().toISOString();
+    const existing = part.researchSessions.find((s) => s.taskId === session.taskId);
+    if (existing) {
+      Object.assign(existing, session, { updatedAt: now });
+      return { ...existing };
+    }
+    const created: ResearchSessionRecord = {
+      ...session,
+      id: generateUuid(),
+      createdAt: now,
+      updatedAt: now,
+    };
+    part.researchSessions.unshift(created);
+    return { ...created };
+  }
+
+  async listResearchSessions(userId: string, limit = 20): Promise<ResearchSessionRecord[]> {
+    return this.getPartition(userId).researchSessions.slice(0, Math.max(1, limit)).map((s) => ({ ...s }));
+  }
+
+  async getResearchSession(userId: string, taskId: string): Promise<ResearchSessionRecord | null> {
+    const found = this.getPartition(userId).researchSessions.find((s) => s.taskId === taskId);
+    return found ? { ...found } : null;
+  }
+
+  async recordResearchSources(
+    userId: string,
+    sessionId: string,
+    sources: Array<Omit<ResearchSourceRecord, 'id' | 'sessionId' | 'createdAt'>>
+  ): Promise<number> {
+    const part = this.getPartition(userId);
+    const now = new Date().toISOString();
+    let written = 0;
+    for (const source of sources.slice(0, 200)) {
+      part.researchSources.push({
+        ...source,
+        // Copyright-safe: hard-bound whatever a caller passes.
+        snippet: (source.snippet ?? '').slice(0, 4000),
+        id: generateUuid(),
+        sessionId,
+        createdAt: now,
+      });
+      written += 1;
+    }
+    return written;
+  }
+
+  async listResearchSources(userId: string, sessionId: string, limit = 50): Promise<ResearchSourceRecord[]> {
+    return this.getPartition(userId)
+      .researchSources.filter((s) => s.sessionId === sessionId)
+      .slice(0, Math.max(1, limit))
+      .map((s) => ({ ...s }));
+  }
+
+  async recordResearchClaims(
+    userId: string,
+    sessionId: string,
+    claims: Array<Omit<ResearchClaimRecord, 'id' | 'sessionId' | 'createdAt'>>
+  ): Promise<number> {
+    const part = this.getPartition(userId);
+    const now = new Date().toISOString();
+    let written = 0;
+    for (const claim of claims.slice(0, 200)) {
+      part.researchClaims.push({
+        ...claim,
+        id: generateUuid(),
+        sessionId,
+        createdAt: now,
+      });
+      written += 1;
+    }
+    return written;
+  }
+
+  async listResearchClaims(userId: string, sessionId: string): Promise<ResearchClaimRecord[]> {
+    return this.getPartition(userId)
+      .researchClaims.filter((c) => c.sessionId === sessionId)
+      .map((c) => ({ ...c }));
   }
 }

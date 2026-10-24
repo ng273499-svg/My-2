@@ -3,6 +3,8 @@ import {
   DocumentIntelligenceEngine,
   type MemoryIngestSink,
 } from '@/core/document-intelligence';
+import { ResearchEngine, RESEARCH_ENGINE_VERSION, RESEARCH_MODES } from '@/core/research';
+import type { ResearchMode } from '@/core/research/types';
 import type { CodingTaskInput, CodingTaskResult } from '@/core/coding-engine';
 import { AIModelRouter } from '@/core/modules/ai-model-router';
 import { ContextEmotionEngine } from '@/core/modules/context-emotion-engine';
@@ -49,7 +51,7 @@ import type { ConnectedToolRecord, DataRepository } from '@/server/repositories/
 import type { SupabaseConnectionDiagnostics } from '@/server/supabase/client';
 
 /** Current JARVIS-X core version string. */
-export const JARVIS_CORE_VERSION = '1.2.0-document-intelligence';
+export const JARVIS_CORE_VERSION = '1.3.0-deep-research';
 
 const DEFAULT_ACTOR: AuthSessionStatus = {
   authenticated: false,
@@ -83,6 +85,7 @@ export class JarvisCore {
   public readonly codingEngine: CodingEngine;
   /** JARVIS-X v1.2.0 Grounded Document Intelligence + Hybrid RAG engine. */
   public readonly documentEngine: DocumentIntelligenceEngine;
+  public readonly researchEngine: ResearchEngine;
   public readonly capabilityRegistry: CapabilityRegistry;
   public readonly specialistRegistry: SpecialistRegistry;
   public readonly runtimeMemoryBridge: RuntimeMemoryBridge;
@@ -103,6 +106,8 @@ export class JarvisCore {
       /** Shared process-wide document engine (server wiring) — keeps ingested
        * documents available across request-scoped JarvisCore instances. */
       documentEngine?: DocumentIntelligenceEngine;
+      /** Shared process-wide research engine (server wiring). */
+      researchEngine?: ResearchEngine;
     }
   ) {
     this.activeUserId = actor.userId;
@@ -133,10 +138,14 @@ export class JarvisCore {
     this.documentEngine =
       runtimeOptions?.documentEngine ?? new DocumentIntelligenceEngine();
 
+    // Wire JARVIS-X v1.3.0 Deep Research & Web Intelligence Engine
+    this.researchEngine = runtimeOptions?.researchEngine ?? new ResearchEngine();
+
     // Wire Core Runtime Orchestrator
     this.capabilityRegistry = new CapabilityRegistry({
       visionEngine: this.visionEngine,
       codingEngine: this.codingEngine,
+      researchEngine: this.researchEngine,
       onIngestKnowledgeChunk: async (userId, chunk, meta) => {
         await this.memoryManager.ingestKnowledgeChunk(userId, chunk, {
           sourceLabel: meta.sourceLabel,
@@ -433,6 +442,7 @@ export class JarvisCore {
         proactiveEnabled: preferences.proactiveAssistanceEnabled,
       }),
       documentIntelligence: this.documentIntelligenceSummary(),
+      research: this.researchSummary(),
     };
   }
 
@@ -463,6 +473,43 @@ export class JarvisCore {
   }
 
   /**
+   * v1.3 research state for the HUD. Reports the provider's REAL status so the
+   * UI can never imply live web research is available when it is not.
+   */
+  researchSummary() {
+    const provider = this.researchEngine.providerHealth();
+    const tasks = this.researchEngine.listTasks(this.activeUserId, 20);
+    const last = tasks[0] ?? null;
+
+    return {
+      version: RESEARCH_ENGINE_VERSION,
+      modes: [...RESEARCH_MODES],
+      provider: {
+        providerId: provider.providerId,
+        label: provider.label,
+        status: provider.status,
+        live: provider.live,
+        zeroCost: provider.zeroCost,
+        detail: provider.detail,
+      },
+      liveWebResearch: provider.live,
+      activeTasks: tasks.filter((t) => t.status === 'RUNNING').length,
+      completedTasks: tasks.filter((t) => t.status === 'COMPLETED' || t.status === 'PARTIAL').length,
+      cancelledTasks: tasks.filter((t) => t.status === 'CANCELLED').length,
+      lastTask: last
+        ? {
+            taskId: last.taskId,
+            mode: last.mode,
+            status: last.status,
+            confidence: last.metrics?.confidence ?? 'INSUFFICIENT',
+            citations: last.metrics?.citationCount ?? 0,
+            live: last.metrics?.live ?? false,
+          }
+        : null,
+    };
+  }
+
+  /**
    * =========================================================================
    * JARVIS-X v1.2.0 — Secure Grounded Document Intelligence interface
    * =========================================================================
@@ -482,6 +529,237 @@ export class JarvisCore {
       };
     }
     return null;
+  }
+
+  private researchAccessError(
+    action: string
+  ): { ok: false; errorCode: string; error: string } | null {
+    if (!this.actor.authenticated) {
+      return {
+        ok: false,
+        errorCode: 'UNAUTHORIZED_ACCESS',
+        error: `${action} requires an authenticated owner session. Research is never performed for guest or voice-only sessions.`,
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Run a bounded, evidence-grounded research task for the authenticated owner.
+   *
+   * Read-only by default: nothing is written to memory unless the caller asks
+   * for it through the research-memory path, and web content never gains
+   * command authority.
+   */
+  async runResearch(input: {
+    query: string;
+    mode?: ResearchMode;
+    projectId?: string | null;
+    documentIds?: string[];
+    freshness?: 'any' | 'recent' | 'latest';
+    maxSources?: number;
+    maxQueries?: number;
+    signal?: AbortSignal;
+    /** Owner-controlled: persist a research summary into hierarchical memory. */
+    saveToMemory?: boolean;
+  }) {
+    const denied = this.researchAccessError('Web research');
+    if (denied) return denied;
+
+    // Document evidence is supplied per call so it is bound to THIS owner's
+    // authorized document store — never a shared process-wide reader.
+    const documentProvider = async (
+      query: string,
+      options: { projectId: string | null; documentIds: string[] }
+    ) => {
+      try {
+        const result = await this.documentEngine.query({
+          ownerId: this.activeUserId,
+          query,
+          projectId: options.projectId,
+          documentIds: options.documentIds,
+          topK: 5,
+        });
+        if (!result.ok || !result.retrieval) return [];
+        const byDocument = new Map<
+          string,
+          { documentId: string; documentTitle: string; passages: Array<{ text: string; page: number | null; section: string | null }> }
+        >();
+        for (const scored of result.retrieval.selected) {
+          const entry = byDocument.get(scored.chunk.documentId) ?? {
+            documentId: scored.chunk.documentId,
+            documentTitle: scored.chunk.documentId,
+            passages: [],
+          };
+          entry.passages.push({ text: scored.chunk.text, page: scored.chunk.page, section: scored.chunk.section });
+          byDocument.set(scored.chunk.documentId, entry);
+        }
+        // Attach real filenames where the store knows them.
+        for (const document of this.documentEngine.listDocuments(this.activeUserId)) {
+          const entry = byDocument.get(document.documentId);
+          if (entry) entry.documentTitle = document.filename;
+        }
+        return [...byDocument.values()];
+      } catch {
+        return [];
+      }
+    };
+
+    const result = await this.researchEngine.run({
+      ownerId: this.activeUserId,
+      query: input.query,
+      mode: input.mode,
+      projectId: input.projectId ?? null,
+      documentIds: input.documentIds ?? [],
+      freshness: input.freshness,
+      maxSources: input.maxSources,
+      maxQueries: input.maxQueries,
+      signal: input.signal,
+      documentProvider,
+    });
+
+    // ---- Persist the research record (bounded, owner-scoped) ----
+    // Research artefacts are stored as research data, never promoted to facts.
+    if (result.report) {
+      try {
+        const session = await this.repository.recordResearchSession?.(this.activeUserId, {
+          projectId: input.projectId ?? null,
+          taskId: result.taskId,
+          query: result.query,
+          mode: result.mode,
+          status: result.status,
+          live: result.report.live,
+          searchProvider: result.metrics.searchProvider,
+          providerStatus: result.metrics.searchProviderStatus,
+          confidenceLevel: result.report.confidence.level,
+          confidenceScore: result.report.confidence.score,
+          sourceCount: result.report.sourcesUsed,
+          evidenceCount: result.metrics.evidenceUnits,
+          contradictionCount: result.metrics.contradictions,
+          citationCount: result.metrics.citationCount,
+          followUpRounds: result.metrics.followUpRounds,
+          queryCount: result.metrics.queryCount,
+          durationMs: result.durationMs,
+          cancelled: result.status === 'CANCELLED',
+          failureCodes: result.errors,
+          limitations: result.report.limitations,
+          reportSummary: result.report.executiveSummary.slice(0, 4000),
+        });
+
+        if (session) {
+          // Bounded snippets only — never a full-page mirror.
+          await this.repository.recordResearchSources?.(
+            this.activeUserId,
+            session.id,
+            result.sources.slice(0, 40).map((source) => ({
+              sourceId: source.sourceId,
+              url: source.url,
+              canonicalUrl: source.canonicalUrl,
+              domain: source.domain,
+              title: source.title,
+              author: source.author,
+              publishedAt: source.publishedAt,
+              retrievedAt: source.retrievedAt,
+              contentHash: source.contentHash,
+              sourceType: source.sourceType,
+              provenance: source.provenance,
+              fetchStatus: source.fetchStatus,
+              qualityScore: Number((source.quality?.overall ?? 0).toFixed(3)),
+              freshnessScore: Number((source.quality?.freshness ?? 0).toFixed(3)),
+              snippet: source.extractedText.slice(0, 1200),
+              duplicateOf: source.duplicateOf,
+              independenceGroup: source.independenceGroup,
+              trustSignals: source.trustSignals,
+            }))
+          );
+
+          await this.repository.recordResearchClaims?.(
+            this.activeUserId,
+            session.id,
+            result.claimGraph.nodes.slice(0, 40).map((node) => ({
+              claimId: node.claimId,
+              claim: node.claim.slice(0, 2000),
+              verificationState: node.state,
+              independentSupport: node.independentSupportCount,
+              sourceCount: node.supportingSourceIds.length,
+              confidence: Number(node.confidence.toFixed(3)),
+              contested: node.contested,
+              supportingSourceIds: node.supportingSourceIds,
+              contradictingSourceIds: node.contradictingSourceIds,
+              evidenceIds: [...node.supportingEvidenceIds, ...node.contradictingEvidenceIds],
+              notes: node.notes,
+            }))
+          );
+        }
+
+        // ---- Optional memory artefact (owner-controlled, verified only) ----
+        if (input.saveToMemory && result.report.verifiedFindings.length > 0) {
+          const summary = result.report.verifiedFindings
+            .slice(0, 5)
+            .map((finding) => `- ${finding.text}`)
+            .join('\n');
+          await this.memoryManager.storeMemory(
+            this.activeUserId,
+            `Research (${result.mode}) — ${result.query}\nConfidence: ${result.report.confidence.level}. Live: ${
+              result.report.live ? 'yes' : 'no (non-live evidence)'
+            }.\nVerified findings:\n${summary}`,
+            'research_summary',
+            ['research', 'v1.3.0', result.mode.toLowerCase()],
+            undefined,
+            undefined,
+            {
+              memoryScope: 'knowledge',
+              projectId: input.projectId ?? null,
+              importance: 4,
+              // Web-derived, so it is NEVER tagged as a user assertion. Only
+              // findings that reached the VERIFIED section are stored, and the
+              // provenance keeps them distinguishable from operator knowledge.
+              provenance: 'untrusted_external',
+              confidence: result.report.confidence.score,
+              metadata: {
+                kind: 'research_summary',
+                version: '1.3.0',
+                taskId: result.taskId,
+                mode: result.mode,
+                live: result.report.live,
+                confidenceLevel: result.report.confidence.level,
+                citations: result.report.citations.slice(0, 8).map((citation) => citation.canonicalUrl),
+              },
+            }
+          );
+        }
+      } catch {
+        // Persistence is best-effort and must never mask a research result.
+      }
+    }
+
+    return result;
+  }
+
+  /** Retrieve a research task owned by the active user. */
+  getResearchTask(taskId: string) {
+    const denied = this.researchAccessError('Research task lookup');
+    if (denied) return denied;
+    return this.researchEngine.getTask(taskId, this.activeUserId);
+  }
+
+  /** Cancel a running research task owned by the active user. */
+  cancelResearchTask(taskId: string) {
+    const denied = this.researchAccessError('Research cancellation');
+    if (denied) return denied;
+    return { cancelled: this.researchEngine.cancel(taskId, this.activeUserId) };
+  }
+
+  /** Bounded research history for the active user. */
+  listResearchHistory(limit = 20) {
+    const denied = this.researchAccessError('Research history');
+    if (denied) return denied;
+    return this.researchEngine.listTasks(this.activeUserId, limit);
+  }
+
+  /** Honest provider status for the HUD. */
+  researchProviderStatus() {
+    return this.researchEngine.providerHealth();
   }
 
   async ingestDocument(input: {

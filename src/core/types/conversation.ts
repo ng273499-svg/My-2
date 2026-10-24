@@ -197,4 +197,29 @@ export interface JarvisSystemSnapshot {
     }>;
     lifecycleCounts: Record<string, number>;
   };
+  /** JARVIS-X v1.3.0 research capability + honest provider state. */
+  research?: {
+    version: string;
+    modes: string[];
+    provider: {
+      providerId: string;
+      label: string;
+      status: string;
+      live: boolean;
+      zeroCost: boolean;
+      detail: string;
+    };
+    liveWebResearch: boolean;
+    activeTasks: number;
+    completedTasks: number;
+    cancelledTasks: number;
+    lastTask: {
+      taskId: string;
+      mode: string;
+      status: string;
+      confidence: string;
+      citations: number;
+      live: boolean;
+    } | null;
+  };
 }

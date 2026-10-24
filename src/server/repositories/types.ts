@@ -169,6 +169,79 @@ export interface ProactiveWorkflowRecord {
   updatedAt: string;
 }
 
+/* ==========================================================================
+ * v1.3 Research records
+ * ======================================================================== */
+
+export interface ResearchSessionRecord {
+  id: string;
+  projectId: string | null;
+  taskId: string;
+  query: string;
+  mode: string;
+  status: string;
+  live: boolean;
+  searchProvider: string;
+  providerStatus: string;
+  confidenceLevel: string;
+  confidenceScore: number;
+  sourceCount: number;
+  evidenceCount: number;
+  contradictionCount: number;
+  citationCount: number;
+  followUpRounds: number;
+  queryCount: number;
+  durationMs: number;
+  cancelled: boolean;
+  failureCodes: string[];
+  limitations: string[];
+  reportSummary: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResearchSourceRecord {
+  id: string;
+  sessionId: string;
+  sourceId: string;
+  url: string;
+  canonicalUrl: string;
+  domain: string;
+  title: string;
+  author: string | null;
+  publishedAt: string | null;
+  retrievedAt: string;
+  contentHash: string;
+  sourceType: string;
+  provenance: string;
+  fetchStatus: string;
+  qualityScore: number;
+  freshnessScore: number;
+  /** Bounded snippet only — never a full-page mirror. */
+  snippet: string;
+  duplicateOf: string | null;
+  independenceGroup: string | null;
+  trustSignals: string[];
+  createdAt: string;
+}
+
+export interface ResearchClaimRecord {
+  id: string;
+  sessionId: string;
+  claimId: string;
+  claim: string;
+  verificationState: string;
+  independentSupport: number;
+  sourceCount: number;
+  confidence: number;
+  contested: boolean;
+  supportingSourceIds: string[];
+  contradictingSourceIds: string[];
+  evidenceIds: string[];
+  notes: string[];
+  createdAt: string;
+}
+
 export interface DataRepository {
   readonly mode: 'ephemeral_session' | 'supabase_cloud' | 'degraded_fallback';
 
@@ -295,4 +368,24 @@ export interface DataRepository {
     >
   ): Promise<ProactiveWorkflowRecord | null>;
   deleteProactiveWorkflow?(userId: string, workflowId: string): Promise<boolean>;
+
+  /* ---- v1.3 research persistence (optional — engine degrades safely) ---- */
+  recordResearchSession?(
+    userId: string,
+    session: Omit<ResearchSessionRecord, 'id' | 'createdAt' | 'updatedAt'>
+  ): Promise<ResearchSessionRecord>;
+  listResearchSessions?(userId: string, limit?: number): Promise<ResearchSessionRecord[]>;
+  getResearchSession?(userId: string, taskId: string): Promise<ResearchSessionRecord | null>;
+  recordResearchSources?(
+    userId: string,
+    sessionId: string,
+    sources: Array<Omit<ResearchSourceRecord, 'id' | 'sessionId' | 'createdAt'>>
+  ): Promise<number>;
+  listResearchSources?(userId: string, sessionId: string, limit?: number): Promise<ResearchSourceRecord[]>;
+  recordResearchClaims?(
+    userId: string,
+    sessionId: string,
+    claims: Array<Omit<ResearchClaimRecord, 'id' | 'sessionId' | 'createdAt'>>
+  ): Promise<number>;
+  listResearchClaims?(userId: string, sessionId: string): Promise<ResearchClaimRecord[]>;
 }

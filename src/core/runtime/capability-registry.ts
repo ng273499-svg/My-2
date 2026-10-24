@@ -10,6 +10,7 @@ import {
 } from '@/core/files';
 import type { VisionEngine } from '@/core/modules/vision-engine';
 import type { CodingEngine } from '@/core/coding-engine';
+import type { ResearchEngine } from '@/core/research';
 import { sanitizeUntrustedExternalOutput } from './errors';
 
 export type CapabilityHandler = (
@@ -28,6 +29,7 @@ export interface CapabilityRegistryOptions {
    * real, bounded repository analysis instead of a static blueprint.
    */
   codingEngine?: CodingEngine;
+  researchEngine?: ResearchEngine;
   onIngestKnowledgeChunk?: (
     userId: string,
     chunk: string,
@@ -50,14 +52,16 @@ export class CapabilityRegistry {
     this.registerDefaults(
       options?.visionEngine,
       options?.onIngestKnowledgeChunk,
-      options?.codingEngine
+      options?.codingEngine,
+      options?.researchEngine
     );
   }
 
   private registerDefaults(
     visionEngine?: VisionEngine,
     onIngestKnowledgeChunk?: CapabilityRegistryOptions['onIngestKnowledgeChunk'],
-    codingEngine?: CodingEngine
+    codingEngine?: CodingEngine,
+    researchEngine?: ResearchEngine
   ): void {
     // 1. Direct Conversation (AVAILABLE)
     this.register({
@@ -97,27 +101,64 @@ export class CapabilityRegistry {
       }),
     });
 
-    // 3. Research (NOT_AVAILABLE for live web search — honest reporting)
+    // 3. Research (v1.3.0 Deep Research & Web Intelligence)
     this.register({
       definition: {
         id: 'research',
-        name: 'Live Web Research & Citation Retrieval',
-        description: 'Queries external search indices and grounded reference sources.',
-        availability: 'NOT_AVAILABLE',
+        name: 'Deep Research & Web Intelligence',
+        description: researchEngine
+          ? 'Bounded, evidence-grounded web research: planning, discovery, extraction, claim verification, contradiction detection and citation-checked reports (zero-cost provider stack).'
+          : 'Provides local research structuring; no live web retrieval is connected.',
+        availability: researchEngine ? 'PARTIAL_LOCAL' : 'NOT_AVAILABLE',
         defaultRiskLevel: 'READ_ONLY',
         countsAsToolCall: true,
         supportsModalities: ['text', 'voice_transcript'],
         missingDependencyNote:
-          'NOT_AVAILABLE — Live Web Search connector is not configured in this phase.',
+          researchEngine && !researchEngine.providerHealth().live
+            ? `LIVE WEB SEARCH IS ${researchEngine.providerHealth().status} — no external search provider is configured, so JARVIS will report the absence of live results instead of fabricating them.`
+            : researchEngine
+              ? undefined
+              : 'NOT_AVAILABLE — research engine is not connected in this build.',
       },
-      execute: async () => ({
-        capabilityId: 'research',
-        status: 'NOT_AVAILABLE',
-        summary:
-          'Capability "research" (live web retrieval) is NOT_AVAILABLE. Returning local structural outline only without fabricated web citations.',
-        honestLimitationNote:
-          'Live external web search is NOT_AVAILABLE; no external URLs or live citations were fetched.',
-      }),
+      execute: async (ctx) => {
+        if (!researchEngine) {
+          return {
+            capabilityId: 'research',
+            status: 'NOT_AVAILABLE',
+            summary:
+              'Capability "research" is NOT_AVAILABLE. No web sources were fetched and no citations were produced.',
+            honestLimitationNote:
+              'Live external web search is NOT_AVAILABLE; no external URLs or live citations were fetched.',
+          };
+        }
+
+        const result = await researchEngine.run({
+          ownerId: ctx.userId,
+          query: ctx.userMessage,
+          mode: 'QUICK_RESEARCH',
+          projectId: ctx.projectId ?? null,
+          signal: ctx.signal,
+        });
+
+        const provider = result.report?.providerStatus;
+        const liveNote = provider?.live
+          ? `Live provider "${provider.providerId}".`
+          : `Search provider status: ${provider?.status ?? 'UNCONFIGURED'} — results are NOT live web research.`;
+
+        return {
+          capabilityId: 'research',
+          status: result.ok ? 'SUCCESS' : 'PARTIAL',
+          summary:
+            result.report?.executiveSummary?.slice(0, 600) ??
+            `Research ${result.status.toLowerCase()} with ${result.sources.length} source(s).`,
+          honestLimitationNote: liveNote,
+          artifacts: {
+            taskId: result.taskId,
+            confidence: result.report?.confidence.level ?? 'INSUFFICIENT',
+            citations: result.report?.citations.length ?? 0,
+          },
+        } as never;
+      },
     });
 
     // 4. Coding (v1.1.0 Coding & Software Engineering Engine)

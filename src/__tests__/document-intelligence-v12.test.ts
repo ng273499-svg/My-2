@@ -1865,7 +1865,7 @@ describe('JARVIS-X v1.2 — Security invariants and honesty', () => {
     });
 
     const snapshot = await core.getSystemSnapshot();
-    expect(snapshot.version).toBe('1.2.0-document-intelligence');
+    expect(snapshot.version).toBe('1.3.0-deep-research');
     expect(snapshot.documentIntelligence).toBeDefined();
 
     const di = snapshot.documentIntelligence!;

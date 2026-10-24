@@ -5,6 +5,7 @@ import { InMemorySessionRepository } from '@/server/repositories/in-memory-repos
 import { ResilientDataRepository } from '@/server/repositories/resilient-repository';
 import { SupabaseDataRepository } from '@/server/repositories/supabase-repository';
 import { getDocumentEngine } from '@/server/document-engine';
+import { getResearchEngine } from '@/server/research-engine';
 import {
   GUEST_ACTOR,
   resolveRequestActor,
@@ -83,6 +84,8 @@ export async function getJarvisCoreForRequest(request?: Request | null): Promise
       // retrievable on the next request; owner isolation is enforced inside the
       // engine by `ownerId` on every read, and memory writes stay per-call.
       documentEngine: getDocumentEngine(),
+      // One research engine per server process; task state is keyed by owner.
+      researchEngine: getResearchEngine(),
     }
   );
 

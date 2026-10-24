@@ -20,6 +20,9 @@ import type {
   ConnectedToolRecord,
   DataRepository,
   DocumentChunkRecord,
+  ResearchClaimRecord,
+  ResearchSessionRecord,
+  ResearchSourceRecord,
   IngestedDocumentRecord,
   ListMemoriesFilter,
   MemoryUpdatePatch,
@@ -1443,4 +1446,222 @@ export class SupabaseDataRepository implements DataRepository {
     assertSupabaseResult(error, 'deleteProactiveWorkflow');
     return Array.isArray(data) && data.length > 0;
   }
+
+  /* ======================================================================
+   * v1.3 Research persistence (owner-scoped; RLS enforces user_id = auth.uid())
+   * ==================================================================== */
+
+  async recordResearchSession(
+    userId: string,
+    session: Omit<ResearchSessionRecord, 'id' | 'createdAt' | 'updatedAt'>
+  ): Promise<ResearchSessionRecord> {
+    const payload = {
+      user_id: userId,
+      project_id: session.projectId ?? null,
+      task_id: session.taskId,
+      query: session.query,
+      mode: session.mode,
+      status: session.status,
+      live: session.live,
+      search_provider: session.searchProvider,
+      provider_status: session.providerStatus,
+      confidence_level: session.confidenceLevel,
+      confidence_score: session.confidenceScore,
+      source_count: session.sourceCount,
+      evidence_count: session.evidenceCount,
+      contradiction_count: session.contradictionCount,
+      citation_count: session.citationCount,
+      follow_up_rounds: session.followUpRounds,
+      query_count: session.queryCount,
+      duration_ms: session.durationMs,
+      cancelled: session.cancelled,
+      failure_codes: session.failureCodes,
+      limitations: session.limitations,
+      report_summary: session.reportSummary ? session.reportSummary.slice(0, 4000) : null,
+      checked_at: new Date().toISOString(),
+    };
+
+    const { data, error } = await this.table('research_sessions')
+      .upsert(payload, { onConflict: 'user_id,task_id' })
+      .select('*')
+      .single();
+
+    assertSupabaseResult(error, 'recordResearchSession');
+    return mapResearchSession(data);
+  }
+
+  async listResearchSessions(userId: string, limit = 20): Promise<ResearchSessionRecord[]> {
+    const { data, error } = await this.table('research_sessions')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(Math.max(1, Math.min(50, limit)));
+
+    assertSupabaseResult(error, 'listResearchSessions');
+    return (data ?? []).map(mapResearchSession);
+  }
+
+  async getResearchSession(userId: string, taskId: string): Promise<ResearchSessionRecord | null> {
+    const { data, error } = await this.table('research_sessions')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('task_id', taskId)
+      .maybeSingle();
+
+    assertSupabaseResult(error, 'getResearchSession');
+    return data ? mapResearchSession(data) : null;
+  }
+
+  async recordResearchSources(
+    userId: string,
+    sessionId: string,
+    sources: Array<Omit<ResearchSourceRecord, 'id' | 'sessionId' | 'createdAt'>>
+  ): Promise<number> {
+    if (sources.length === 0) return 0;
+
+    const rows = sources.slice(0, 200).map((source) => ({
+      user_id: userId,
+      session_id: sessionId,
+      source_id: source.sourceId,
+      url: source.url,
+      canonical_url: source.canonicalUrl,
+      domain: source.domain,
+      title: source.title.slice(0, 400),
+      author: source.author,
+      published_at: source.publishedAt,
+      retrieved_at: source.retrievedAt,
+      content_hash: source.contentHash,
+      source_type: source.sourceType,
+      provenance: source.provenance,
+      fetch_status: source.fetchStatus,
+      quality_score: source.qualityScore,
+      freshness_score: source.freshnessScore,
+      // Copyright-safe: bounded snippet only.
+      snippet: (source.snippet ?? '').slice(0, 4000),
+      duplicate_of: source.duplicateOf,
+      independence_group: source.independenceGroup,
+      trust_signals: source.trustSignals,
+    }));
+
+    const { error } = await this.table('research_sources').insert(rows);
+    assertSupabaseResult(error, 'recordResearchSources');
+    return rows.length;
+  }
+
+  async listResearchSources(userId: string, sessionId: string, limit = 50): Promise<ResearchSourceRecord[]> {
+    const { data, error } = await this.table('research_sources')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('session_id', sessionId)
+      .limit(Math.max(1, Math.min(200, limit)));
+
+    assertSupabaseResult(error, 'listResearchSources');
+
+    return (data ?? []).map((row: any) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      sourceId: row.source_id,
+      url: row.url,
+      canonicalUrl: row.canonical_url,
+      domain: row.domain,
+      title: row.title,
+      author: row.author,
+      publishedAt: row.published_at,
+      retrievedAt: row.retrieved_at,
+      contentHash: row.content_hash,
+      sourceType: row.source_type,
+      provenance: row.provenance,
+      fetchStatus: row.fetch_status,
+      qualityScore: Number(row.quality_score ?? 0),
+      freshnessScore: Number(row.freshness_score ?? 0),
+      snippet: row.snippet,
+      duplicateOf: row.duplicate_of,
+      independenceGroup: row.independence_group,
+      trustSignals: row.trust_signals ?? [],
+      createdAt: row.created_at,
+    }));
+  }
+
+  async recordResearchClaims(
+    userId: string,
+    sessionId: string,
+    claims: Array<Omit<ResearchClaimRecord, 'id' | 'sessionId' | 'createdAt'>>
+  ): Promise<number> {
+    if (claims.length === 0) return 0;
+
+    const rows = claims.slice(0, 200).map((claim) => ({
+      user_id: userId,
+      session_id: sessionId,
+      claim_id: claim.claimId,
+      claim: claim.claim.slice(0, 2000),
+      verification_state: claim.verificationState,
+      independent_support: claim.independentSupport,
+      source_count: claim.sourceCount,
+      confidence: claim.confidence,
+      contested: claim.contested,
+      supporting_source_ids: claim.supportingSourceIds,
+      contradicting_source_ids: claim.contradictingSourceIds,
+      evidence_ids: claim.evidenceIds,
+      notes: claim.notes,
+    }));
+
+    const { error } = await this.table('research_claims').insert(rows);
+    assertSupabaseResult(error, 'recordResearchClaims');
+    return rows.length;
+  }
+
+  async listResearchClaims(userId: string, sessionId: string): Promise<ResearchClaimRecord[]> {
+    const { data, error } = await this.table('research_claims')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('session_id', sessionId);
+
+    assertSupabaseResult(error, 'listResearchClaims');
+
+    return (data ?? []).map((row: any) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      claimId: row.claim_id,
+      claim: row.claim,
+      verificationState: row.verification_state,
+      independentSupport: row.independent_support,
+      sourceCount: row.source_count,
+      confidence: Number(row.confidence ?? 0),
+      contested: row.contested,
+      supportingSourceIds: row.supporting_source_ids ?? [],
+      contradictingSourceIds: row.contradicting_source_ids ?? [],
+      evidenceIds: row.evidence_ids ?? [],
+      notes: row.notes ?? [],
+      createdAt: row.created_at,
+    }));
+  }
+}
+
+function mapResearchSession(row: any): ResearchSessionRecord {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    query: row.query,
+    mode: row.mode,
+    status: row.status,
+    live: Boolean(row.live),
+    searchProvider: row.search_provider,
+    providerStatus: row.provider_status,
+    confidenceLevel: row.confidence_level,
+    confidenceScore: Number(row.confidence_score ?? 0),
+    sourceCount: row.source_count,
+    evidenceCount: row.evidence_count,
+    contradictionCount: row.contradiction_count,
+    citationCount: row.citation_count,
+    followUpRounds: row.follow_up_rounds,
+    queryCount: row.query_count,
+    durationMs: row.duration_ms,
+    cancelled: Boolean(row.cancelled),
+    failureCodes: row.failure_codes ?? [],
+    limitations: row.limitations ?? [],
+    reportSummary: row.report_summary,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }

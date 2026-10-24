@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, BookOpen, Code2, Cpu, MessageSquare } from 'lucide-react';
+import { Activity, BookOpen, Code2, Cpu, Globe, MessageSquare } from 'lucide-react';
 import { DEFAULT_CONVERSATION_ID } from '@/core/utils/uuid';
 import type {
   AgentActivityStep,
@@ -52,6 +52,12 @@ import {
   type KnowledgeDocument,
   type KnowledgeQueryResult,
 } from './KnowledgeWorkspacePanel';
+import {
+  ResearchWorkspacePanel,
+  type ResearchMode,
+  type ResearchProviderView,
+  type ResearchResultView,
+} from './ResearchWorkspacePanel';
 import { SystemTelemetryPanel } from './SystemTelemetryPanel';
 import { VisionInspectorModal } from './VisionInspectorModal';
 import { SettingsDrawer } from './SettingsDrawer';
@@ -88,7 +94,7 @@ export function JarvisDashboard({
 
   // Mobile responsive view tab
   const [mobileView, setMobileView] = useState<
-    'console' | 'activity' | 'systems' | 'engineering' | 'knowledge'
+    'console' | 'activity' | 'systems' | 'engineering' | 'knowledge' | 'research'
   >('console');
 
   // --- v1.2 Knowledge/Documents workspace state -------------------------
@@ -97,6 +103,7 @@ export function JarvisDashboard({
     mode: string;
     honestNote: string;
   } | null>(null);
+  const [researchProvider, setResearchProvider] = useState<ResearchProviderView | null>(null);
   const [knowledgeRerankingMode, setKnowledgeRerankingMode] = useState<string>(
     'deterministic_fallback'
   );
@@ -158,6 +165,44 @@ export function JarvisDashboard({
     },
     [refreshKnowledgeDocuments]
   );
+
+  const refreshResearchProvider = useCallback(async () => {
+    try {
+      const response = await fetch('/api/jarvis/research', { method: 'GET' });
+      if (!response.ok) return;
+      const payload = (await response.json()) as { provider?: ResearchProviderView };
+      if (payload.provider) setResearchProvider(payload.provider);
+    } catch {
+      // Provider status is advisory; failures must not break the HUD.
+    }
+  }, []);
+
+  const handleResearchRun = useCallback(
+    async (input: { query: string; mode: ResearchMode }): Promise<ResearchResultView | null> => {
+      const response = await fetch('/api/jarvis/research', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: input.query, mode: input.mode }),
+      });
+      const payload = (await response.json()) as
+        | (ResearchResultView & { ok?: boolean; error?: string })
+        | { ok?: false; error?: string };
+
+      if (!response.ok || !('taskId' in payload)) {
+        throw new Error(('error' in payload && payload.error) || 'Research request failed.');
+      }
+      return payload as ResearchResultView;
+    },
+    []
+  );
+
+  const handleResearchCancel = useCallback(async (taskId: string): Promise<boolean> => {
+    const response = await fetch(`/api/jarvis/research/${encodeURIComponent(taskId)}/cancel`, {
+      method: 'POST',
+    });
+    const payload = (await response.json()) as { ok?: boolean; cancelled?: boolean };
+    return Boolean(response.ok && payload.cancelled);
+  }, []);
 
   const handleKnowledgeQuery = useCallback(
     async (query: string): Promise<KnowledgeQueryResult> => {
@@ -1082,6 +1127,21 @@ export function JarvisDashboard({
                   <BookOpen className="h-4 w-4" />
                   <span>Knowledge</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileView('research');
+                    void refreshResearchProvider();
+                  }}
+                  className={`flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl font-display text-xs font-semibold transition ${
+                    mobileView === 'research'
+                      ? 'border border-cyan-400/40 bg-cyan-500/15 text-cyan-100'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Globe className="h-4 w-4" />
+                  <span>Research</span>
+                </button>
               </nav>
 
               {mobileView === 'console' && (
@@ -1173,6 +1233,15 @@ export function JarvisDashboard({
               {mobileView === 'engineering' && (
                 <EngineeringWorkspacePanel
                   authenticated={Boolean(snapshot?.auth.authenticated)}
+                />
+              )}
+
+              {mobileView === 'research' && (
+                <ResearchWorkspacePanel
+                  authenticated={Boolean(snapshot?.auth.authenticated)}
+                  provider={researchProvider ?? snapshot?.research?.provider ?? null}
+                  onRun={handleResearchRun}
+                  onCancel={handleResearchCancel}
                 />
               )}
 
