@@ -1303,6 +1303,36 @@ describe('JARVIS-X v1.2 — Integration and governance', () => {
     expect('ok' in okIngest && okIngest.ok).toBe(true);
   });
 
+  it('AA0. honours cooperative cancellation and leaves no retrievable state', async () => {
+    const engine = makeEngine();
+
+    const controller = new AbortController();
+    controller.abort();
+
+    const cancelledIngest = await engine.ingest({
+      ownerId: 'owner-a',
+      fileName: 'cancelled.md',
+      mimeType: 'text/markdown',
+      textContent: '# Cancelled\n\nThis must never be indexed.',
+      signal: controller.signal,
+    });
+
+    expect(cancelledIngest.ok).toBe(false);
+    expect(cancelledIngest.documentId).toBeNull();
+    expect(cancelledIngest.errors.join(' ')).toMatch(/cancelled/i);
+    expect(engine.retrievableChunkCount('owner-a')).toBe(0);
+    expect(engine.listDocuments('owner-a')).toHaveLength(0);
+
+    const cancelledQuery = await engine.query({
+      ownerId: 'owner-a',
+      query: 'anything',
+      signal: controller.signal,
+    });
+    expect(cancelledQuery.ok).toBe(false);
+    expect(cancelledQuery.answer).toBeNull();
+    expect(cancelledQuery.errors.join(' ')).toMatch(/cancelled/i);
+  });
+
   it('AA. handles empty, oversized and unsupported inputs without fabricating success', async () => {
     const engine = makeEngine();
 

@@ -92,6 +92,8 @@ export interface IngestInput {
   titleHint?: string | null;
   /** Per-request, actor-bound knowledge sink (see MemoryIngestSink). */
   memorySink?: MemoryIngestSink;
+  /** Optional cooperative cancellation, checked between pipeline phases. */
+  signal?: AbortSignal;
 }
 
 function newId(prefix: string): string {
@@ -250,6 +252,12 @@ export class DocumentIntelligenceEngine {
       );
     }
 
+    const cancelled = (): boolean => Boolean(input.signal?.aborted);
+
+    if (cancelled()) {
+      return fail('FAILED', 'Document ingestion was cancelled before parsing.');
+    }
+
     // ---- 2. Format resolution ------------------------------------------
     const format: SupportedDocumentFormat =
       verdict.detectedFormat ?? (formatFromExtension(input.fileName) as SupportedDocumentFormat);
@@ -298,6 +306,10 @@ export class DocumentIntelligenceEngine {
         durationMs: Date.now() - startedAt,
         parser: existing.document.parser,
       };
+    }
+
+    if (cancelled()) {
+      return fail('FAILED', 'Document ingestion was cancelled before extraction.');
     }
 
     // ---- 4. Extraction --------------------------------------------------
@@ -416,6 +428,10 @@ export class DocumentIntelligenceEngine {
       durationMs: Date.now() - startedAt,
       errors: [],
     });
+
+    if (cancelled()) {
+      return fail('FAILED', 'Document ingestion was cancelled after normalization; nothing was indexed.');
+    }
 
     // ---- 7. Chunking -----------------------------------------------------
     // Populate the section map from actual structure before chunking.
@@ -642,9 +658,20 @@ export class DocumentIntelligenceEngine {
     includeAllProjects?: boolean;
     topK?: number;
     budgetTokens?: number;
+    signal?: AbortSignal;
   }): Promise<DocumentQueryResult> {
     const startedAt = Date.now();
     const errors: string[] = [];
+
+    if (params.signal?.aborted) {
+      return {
+        ok: false,
+        answer: null,
+        retrieval: null,
+        errors: ['Document query was cancelled before retrieval.'],
+        durationMs: Date.now() - startedAt,
+      };
+    }
 
     if (!params.ownerId) {
       return {
@@ -675,6 +702,16 @@ export class DocumentIntelligenceEngine {
     const retrieved = await this.retriever.retrieve(params.query, scope, {
       candidateLimit: 40,
     });
+
+    if (params.signal?.aborted) {
+      return {
+        ok: false,
+        answer: null,
+        retrieval: null,
+        errors: ['Document query was cancelled after retrieval; no answer was produced.'],
+        durationMs: Date.now() - startedAt,
+      };
+    }
 
     this.record({
       documentId: null,
