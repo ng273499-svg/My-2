@@ -213,7 +213,10 @@ describe('JARVIS-X v0.5 — Advanced Hierarchical Memory Engine', () => {
   });
 
   it('computes Ebbinghaus temporal decay by scope/importance, reinforces recalled entries, and filters TTL-expired entries', async () => {
-    const nowMs = Date.parse('2026-10-23T12:00:00.000Z');
+    // Anchored to the wall clock, not a frozen literal: `listMemories` filters
+    // TTLs against real `Date.now()`, so a hardcoded timestamp turns this test
+    // into a time bomb once the calendar passes the fixture's expiry window.
+    const nowMs = Date.now();
     const sixtyDaysAgoIso = new Date(nowMs - 60 * 86_400_000).toISOString();
 
     const oldProcedural = computeTemporalRetentionScore(
